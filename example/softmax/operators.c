@@ -1,63 +1,26 @@
-/*
- * Copyright (c) 2026 BOSC & ICT, CAS
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met: redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer;
- * redistributions in binary form must reproduce the above copyright
- * notice, this list of conditions and the following disclaimer in the
- * documentation and/or other materials provided with the distribution;
- * neither the name of the copyright holders nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
-#include <stdint.h>
-
-#include "ztt_llm_case.h"
-
-static float ztt_llm_output[ZTT_LLM_TILE_ELEMENTS] ZTT_LLM_ALIGNED;
+/* Copyright (c) 2026 BOSC & ICT, CAS. All rights reserved. */
 
 #if !defined(__riscv)
-static float
-ztt_llm_pow2_integer(int exponent)
-{
-    uint32_t bits;
-    if (exponent < -126)
-        bits = 0;
-    else if (exponent > 127)
-        bits = UINT32_C(0x7f800000);
-    else
-        bits = (uint32_t)(exponent + 127) << 23;
-    float value;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
+#include <math.h>
 #endif
+#include <stdint.h>
+
+#include "operators.h"
+#include "ztt_operator_case.h"
+
+static float ztt_operator_outputs[ZTT_OPERATOR_CASE_COUNT]
+                                 [ZTT_OPERATOR_MAX_OUTPUT_ELEMENTS]
+                                 ZTT_LLM_ALIGNED;
 
 uint64_t
-ztt_llm_run_case(struct ztt_llm_case_result *result)
+ztt_softmax_fp32(const float *input, unsigned rows, unsigned cols,
+                 float *output)
 {
-    float input[ZTT_LLM_TILE_ELEMENTS] ZTT_LLM_ALIGNED;
-    for (unsigned row = 0; row < ZTT_LLM_TILE; ++row)
-        for (unsigned col = 0; col < ZTT_LLM_TILE; ++col)
-            input[row * ZTT_LLM_TILE + col] =
-                (float)((int)col - (int)row);
+    if (!input || !output || rows == 0 || rows > ZTT_LLM_TILE ||
+        cols == 0 || cols > ZTT_LLM_TILE)
+        return ZTT_OPERATOR_INVALID_ARGUMENT;
 
+    float tile[ZTT_LLM_TILE_ELEMENTS] ZTT_LLM_ALIGNED;
 #if defined(__riscv)
     const uint64_t fp32 = ZTT_DTYPE_FP32_RNE;
     ztt_llm_acquire();
@@ -76,36 +39,46 @@ ztt_llm_run_case(struct ztt_llm_case_result *result)
         "mrec.ew m3, m3\n\t"
         "mmul.ew m4, m2, m3\n\t"
         "mss.rm m4, %[output]"
-        :: [fp32] "r"(fp32), [input] "r"(input),
-           [output] "r"(ztt_llm_output)
+        :: [fp32] "r"(fp32), [input] "r"(input), [output] "r"(tile)
         : "memory");
-    result->status = ztt_llm_release();
+    const uint64_t status = ztt_llm_release();
 #else
     for (unsigned row = 0; row < ZTT_LLM_TILE; ++row) {
         float maximum = input[row * ZTT_LLM_TILE];
-        for (unsigned col = 1; col < ZTT_LLM_TILE; ++col) {
-            const float value = input[row * ZTT_LLM_TILE + col];
-            if (value > maximum)
-                maximum = value;
-        }
-        float exponentials[ZTT_LLM_TILE];
+        for (unsigned col = 1; col < ZTT_LLM_TILE; ++col)
+            if (input[row * ZTT_LLM_TILE + col] > maximum)
+                maximum = input[row * ZTT_LLM_TILE + col];
         float sum = 0.0f;
         for (unsigned col = 0; col < ZTT_LLM_TILE; ++col) {
-            const int shifted = (int)(
-                input[row * ZTT_LLM_TILE + col] - maximum);
-            exponentials[col] = ztt_llm_pow2_integer(shifted);
-            sum += exponentials[col];
+            tile[row * ZTT_LLM_TILE + col] =
+                exp2f(input[row * ZTT_LLM_TILE + col] - maximum);
+            sum += tile[row * ZTT_LLM_TILE + col];
         }
-        const float reciprocal = 1.0f / sum;
         for (unsigned col = 0; col < ZTT_LLM_TILE; ++col)
-            ztt_llm_output[row * ZTT_LLM_TILE + col] =
-                exponentials[col] * reciprocal;
+            tile[row * ZTT_LLM_TILE + col] /= sum;
     }
-    result->status = 0;
+    const uint64_t status = 0;
 #endif
 
-    result->output = ztt_llm_output;
-    result->element_count = ZTT_LLM_TILE_ELEMENTS;
-    result->element_bytes = sizeof(ztt_llm_output[0]);
-    return result->status;
+    for (unsigned row = 0; row < rows; ++row)
+        for (unsigned col = 0; col < cols; ++col)
+            output[row * cols + col] = tile[row * ZTT_LLM_TILE + col];
+    return status;
+}
+
+uint64_t
+ztt_operator_run_suite(struct ztt_operator_suite_result *result)
+{
+    uint64_t status = 0;
+    result->case_count = ZTT_OPERATOR_CASE_COUNT;
+    for (unsigned i = 0; i < ZTT_OPERATOR_CASE_COUNT; ++i) {
+        const struct ztt_generated_softmax_case *test = &ztt_operator_cases[i];
+        const uint64_t case_status = ztt_softmax_fp32(
+            test->input, test->rows, test->cols, ztt_operator_outputs[i]);
+        result->cases[i] = (struct ztt_operator_case_result){
+            test->name, ztt_operator_outputs[i], test->rows * test->cols,
+            sizeof(float), case_status};
+        status |= case_status;
+    }
+    return status;
 }

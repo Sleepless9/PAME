@@ -56,6 +56,14 @@ M5OUT_DIR := $(BUILD_DIR)/m5out
 GENERATED_DIR := $(BUILD_DIR)/generated
 BUILD_CONFIG := $(GENERATED_DIR)/build-config.txt
 
+OPERATOR_CONFIG ?=
+OPERATOR_CONFIG := $(if $(strip $(OPERATOR_CONFIG)),$(abspath $(OPERATOR_CONFIG)),)
+OPERATOR_CASE_TOOL := $(COMMON_DIR)/operator_case.py
+OPERATOR_CASE_HEADER := $(GENERATED_DIR)/ztt_operator_cases.h
+OPERATOR_REFERENCE := $(REPORT_DIR)/$(CASE_BINARY).reference.json
+HOST_METRICS := $(REPORT_DIR)/$(CASE_BINARY).host.metrics.json
+MINOR_METRICS := $(REPORT_DIR)/$(CASE_BINARY).minor.metrics.json
+
 SOURCE := $(CASE_DIR)/main.c
 OPERATOR_SOURCE := $(CASE_DIR)/operators.c
 HOST_SOURCES ?= $(SOURCE) $(OPERATOR_SOURCE)
@@ -68,6 +76,11 @@ MINOR_REPORT := $(REPORT_DIR)/$(CASE_BINARY).minor.txt
 CASE_REPORT := $(REPORT_DIR)/REPORT.md
 DISASSEMBLY := $(DISASM_DIR)/$(CASE_BINARY).dis
 CASE_DISPLAY := $(patsubst test_llm_%,%,$(CASE_BINARY))
+
+ifneq ($(strip $(OPERATOR_CONFIG)),)
+OPERATOR_BUILD_FLAGS := -DZTT_EXTERNAL_OPERATOR_CASES -include $(OPERATOR_CASE_HEADER)
+GENERATED_HEADERS += $(OPERATOR_CASE_HEADER)
+endif
 
 # Validation modes:
 #   GOLDEN=host       compare MinorCPU with the host C implementation
@@ -90,7 +103,7 @@ ifneq ($(strip $(MATRIX_INPUT)),)
 override MATRIX_INPUT := $(abspath $(MATRIX_INPUT))
 MATRIX_HEADER := $(GENERATED_DIR)/ztt_matrix_input.h
 MATRIX_BUILD_FLAGS := -DZTT_EXTERNAL_MATRIX_INPUT -include $(MATRIX_HEADER)
-GENERATED_HEADERS := $(MATRIX_HEADER)
+GENERATED_HEADERS += $(MATRIX_HEADER)
 endif
 
 ifeq ($(GOLDEN),reference)
@@ -144,7 +157,8 @@ COMMON_HEADERS := $(wildcard $(COMMON_DIR)/*.h)
 RUNTIME_SOURCES := $(RUNTIME_DIR)/crt0.S $(RUNTIME_DIR)/runtime.c
 RUNTIME_HEADERS := $(wildcard $(RUNTIME_DIR)/include/*.h)
 
-HOST_CFLAGS := -O2 -g -Wall -Wextra -Werror -I$(COMMON_DIR) $(MATRIX_BUILD_FLAGS) $(HOST_EXTRA_CFLAGS)
+HOST_CFLAGS := -O2 -g -Wall -Wextra -Werror -I$(COMMON_DIR) \
+	$(MATRIX_BUILD_FLAGS) $(OPERATOR_BUILD_FLAGS) $(HOST_EXTRA_CFLAGS)
 TARGET_CFLAGS := \
 	-target riscv64-unknown-elf \
 	-resource-dir $(CLANG_RESOURCE_DIR) \
@@ -156,6 +170,7 @@ TARGET_CFLAGS := \
 	-ffunction-sections -fdata-sections \
 	-fno-vectorize -fno-slp-vectorize -ffp-contract=off \
 	-I$(COMMON_DIR) -I$(RUNTIME_DIR)/include $(MATRIX_BUILD_FLAGS) \
+	$(OPERATOR_BUILD_FLAGS) \
 	$(TARGET_EXTRA_CFLAGS)
 TARGET_LINKER_SCRIPT ?= $(RUNTIME_DIR)/link.ld
 TARGET_LDFLAGS := \
@@ -175,6 +190,7 @@ test:
 	@echo "[TEST] $(CASE_DISPLAY): $(CASE_DESCRIPTION)"
 	+$(MAKE) --no-print-directory report
 
+ifeq ($(strip $(OPERATOR_CONFIG)),)
 run: $(RUN_DEPENDENCIES)
 	@mkdir -p $(LOG_DIR)
 	@if cmp -s $(GOLDEN_REPORT) $(MINOR_REPORT); then \
@@ -184,6 +200,10 @@ run: $(RUN_DEPENDENCIES)
 		diff -u $(GOLDEN_REPORT) $(MINOR_REPORT) | tee $(LOG_DIR)/golden-minor.diff; \
 		exit 1; \
 	fi
+else
+run: $(HOST_METRICS) $(MINOR_METRICS)
+	@echo "[PASS] $(CASE_DISPLAY): Host and MinorCPU match independent reference"
+endif
 
 audit: $(DISASSEMBLY)
 	@for mnemonic in $(REQUIRED_MNEMONICS); do \
@@ -194,6 +214,7 @@ audit: $(DISASSEMBLY)
 	done
 	@echo "[PASS] $(CASE_DISPLAY): instruction audit"
 
+ifeq ($(strip $(OPERATOR_CONFIG)),)
 report: run audit
 	python3 $(COMMON_DIR)/write_report.py case \
 		--name $(CASE_BINARY) \
@@ -204,6 +225,16 @@ report: run audit
 		--minor $(MINOR_REPORT) \
 		--output $(CASE_REPORT)
 	@echo "[PASS] $(CASE_DISPLAY): report $(CASE_REPORT)"
+else
+report: run audit
+	python3 $(OPERATOR_CASE_TOOL) markdown \
+		--name $(CASE_BINARY) \
+		--description "$(CASE_DESCRIPTION)" \
+		--host-metrics $(HOST_METRICS) \
+		--minor-metrics $(MINOR_METRICS) \
+		--output $(CASE_REPORT)
+	@echo "[PASS] $(CASE_DISPLAY): metrics report $(CASE_REPORT)"
+endif
 
 check-host-tools:
 	@command -v "$(HOST_CC)" >/dev/null 2>&1 || test -x "$(HOST_CC)" || { \
@@ -239,7 +270,9 @@ $(BUILD_CONFIG): force
 	@mkdir -p $(GENERATED_DIR)
 	@printf '%s\n' \
 		'MATRIX_INPUT=$(MATRIX_INPUT)' \
-		'MATRIX_BUILD_FLAGS=$(MATRIX_BUILD_FLAGS)' > $@.tmp
+		'MATRIX_BUILD_FLAGS=$(MATRIX_BUILD_FLAGS)' \
+		'OPERATOR_CONFIG=$(OPERATOR_CONFIG)' \
+		'OPERATOR_BUILD_FLAGS=$(OPERATOR_BUILD_FLAGS)' > $@.tmp
 	@if ! cmp -s $@.tmp $@; then cp $@.tmp $@; fi
 	@rm -f $@.tmp
 
@@ -248,6 +281,28 @@ $(MATRIX_HEADER): force $(MATRIX_INPUT) $(COMMON_DIR)/matrix_case.py
 	@mkdir -p $(GENERATED_DIR)
 	python3 $(COMMON_DIR)/matrix_case.py header \
 		--input $(MATRIX_INPUT) --output $@
+endif
+
+ifneq ($(strip $(OPERATOR_CONFIG)),)
+$(OPERATOR_CASE_HEADER): force $(OPERATOR_CONFIG) $(OPERATOR_CASE_TOOL)
+	@mkdir -p $(GENERATED_DIR)
+	python3 $(OPERATOR_CASE_TOOL) header \
+		--config $(OPERATOR_CONFIG) --output $@
+
+$(OPERATOR_REFERENCE): force $(OPERATOR_CONFIG) $(OPERATOR_CASE_TOOL)
+	@mkdir -p $(REPORT_DIR)
+	python3 $(OPERATOR_CASE_TOOL) reference \
+		--config $(OPERATOR_CONFIG) --output $@
+
+$(HOST_METRICS): $(HOST_REPORT) $(OPERATOR_REFERENCE) $(OPERATOR_CASE_TOOL)
+	python3 $(OPERATOR_CASE_TOOL) compare \
+		--config $(OPERATOR_CONFIG) --report $(HOST_REPORT) \
+		--label Host --output $@
+
+$(MINOR_METRICS): $(MINOR_REPORT) $(OPERATOR_REFERENCE) $(OPERATOR_CASE_TOOL)
+	python3 $(OPERATOR_CASE_TOOL) compare \
+		--config $(OPERATOR_CONFIG) --report $(MINOR_REPORT) \
+		--label MinorCPU --output $@
 endif
 
 ifeq ($(GOLDEN),reference)

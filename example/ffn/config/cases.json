@@ -1,0 +1,42 @@
+{
+  "operator": "ffn",
+  "atol": 0.0005,
+  "rtol": 0.001,
+  "cases": [
+    {
+      "name": "zeros-2x2x2",
+      "dimensions": {"tokens": 2, "input_dim": 2, "hidden_dim": 2, "output_dim": 2},
+      "input": {"pattern": "zeros"},
+      "w1": {"pattern": "random", "seed": 11, "low": -1.0, "high": 1.0},
+      "w2": {"pattern": "random", "seed": 12, "low": -1.0, "high": 1.0}
+    },
+    {
+      "name": "constant-3x4x2",
+      "dimensions": {"tokens": 3, "input_dim": 4, "hidden_dim": 3, "output_dim": 2},
+      "input": {"pattern": "constant", "value": 0.625},
+      "w1": {"pattern": "mixed"},
+      "w2": {"pattern": "random", "seed": 22, "low": -1.0, "high": 1.0}
+    },
+    {
+      "name": "mixed-noninteger-4x4x4",
+      "dimensions": {"tokens": 4, "input_dim": 4, "hidden_dim": 4, "output_dim": 4},
+      "input": {"pattern": "mixed"},
+      "w1": {"pattern": "random", "seed": 31, "low": -1.25, "high": 1.25},
+      "w2": {"pattern": "random", "seed": 32, "low": -1.25, "high": 1.25}
+    },
+    {
+      "name": "extreme-2x4x3",
+      "dimensions": {"tokens": 2, "input_dim": 4, "hidden_dim": 4, "output_dim": 3},
+      "input": {"pattern": "extreme", "low": -4.0, "high": 4.0, "middle": 0.0625},
+      "w1": {"pattern": "random", "seed": 41, "low": -1.0, "high": 1.0},
+      "w2": {"pattern": "random", "seed": 42, "low": -1.0, "high": 1.0}
+    },
+    {
+      "name": "random-seed-65537-3x3x4",
+      "dimensions": {"tokens": 3, "input_dim": 3, "hidden_dim": 4, "output_dim": 2},
+      "input": {"pattern": "random", "seed": 65537, "low": -2.0, "high": 2.0},
+      "w1": {"pattern": "random", "seed": 65539, "low": -1.0, "high": 1.0},
+      "w2": {"pattern": "random", "seed": 65543, "low": -1.0, "high": 1.0}
+    }
+  ]
+}

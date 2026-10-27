@@ -1,0 +1,52 @@
+{
+  "operator": "mha",
+  "atol": 0.0005,
+  "rtol": 0.001,
+  "cases": [
+    {
+      "name": "zeros-1head-seq2",
+      "dimensions": {"sequence": 2, "model_dim": 2, "head_dim": 2, "heads": 1},
+      "input": {"pattern": "zeros"},
+      "wq": {"pattern": "constant", "value": 1.0},
+      "wk": {"pattern": "constant", "value": 1.0},
+      "wv": {"pattern": "constant", "value": 1.0},
+      "softmax_scale": 0.70710677
+    },
+    {
+      "name": "constant-1head-seq3",
+      "dimensions": {"sequence": 3, "model_dim": 4, "head_dim": 2, "heads": 1},
+      "input": {"pattern": "constant", "value": 0.75},
+      "wq": {"pattern": "mixed"},
+      "wk": {"pattern": "mixed"},
+      "wv": {"pattern": "constant", "value": -0.5},
+      "softmax_scale": 0.70710677
+    },
+    {
+      "name": "mixed-noninteger-2heads-4x4",
+      "dimensions": {"sequence": 4, "model_dim": 4, "head_dim": 4, "heads": 2},
+      "input": {"pattern": "mixed"},
+      "wq": {"pattern": "random", "seed": 1001, "low": -1.0, "high": 1.0},
+      "wk": {"pattern": "random", "seed": 2001, "low": -1.0, "high": 1.0},
+      "wv": {"pattern": "random", "seed": 3001, "low": -1.0, "high": 1.0},
+      "softmax_scale": 0.5
+    },
+    {
+      "name": "extreme-2heads-seq2",
+      "dimensions": {"sequence": 2, "model_dim": 4, "head_dim": 2, "heads": 2},
+      "input": {"pattern": "extreme", "low": -4.0, "high": 4.0, "middle": 0.125},
+      "wq": {"pattern": "random", "seed": 4100, "low": -1.5, "high": 1.5},
+      "wk": {"pattern": "random", "seed": 4200, "low": -1.5, "high": 1.5},
+      "wv": {"pattern": "random", "seed": 4300, "low": -1.5, "high": 1.5},
+      "softmax_scale": 0.70710677
+    },
+    {
+      "name": "random-seed-57721-2heads-seq3",
+      "dimensions": {"sequence": 3, "model_dim": 3, "head_dim": 3, "heads": 2},
+      "input": {"pattern": "random", "seed": 57721, "low": -2.0, "high": 2.0},
+      "wq": {"pattern": "random", "seed": 57731, "low": -1.0, "high": 1.0},
+      "wk": {"pattern": "random", "seed": 57741, "low": -1.0, "high": 1.0},
+      "wv": {"pattern": "random", "seed": 57751, "low": -1.0, "high": 1.0},
+      "softmax_scale": 0.57735026
+    }
+  ]
+}

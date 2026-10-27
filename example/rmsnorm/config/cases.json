@@ -1,0 +1,42 @@
+{
+  "operator": "rmsnorm",
+  "atol": 0.00002,
+  "rtol": 0.0002,
+  "cases": [
+    {
+      "name": "zeros-2x2",
+      "shape": [2, 2],
+      "input": {"pattern": "zeros"},
+      "epsilon": 0.00001,
+      "gamma": {"pattern": "constant", "value": 1.0}
+    },
+    {
+      "name": "constant-3x4",
+      "shape": [3, 4],
+      "input": {"pattern": "constant", "value": -1.25},
+      "epsilon": 0.00001,
+      "gamma": {"pattern": "constant", "value": 0.75}
+    },
+    {
+      "name": "mixed-noninteger-4x4",
+      "shape": [4, 4],
+      "input": {"pattern": "mixed"},
+      "epsilon": 0.0001,
+      "gamma": [1.0, 0.75, 1.25, -0.5]
+    },
+    {
+      "name": "extreme-2x4",
+      "shape": [2, 4],
+      "input": {"pattern": "extreme", "low": -128.0, "high": 96.0, "middle": 0.03125},
+      "epsilon": 0.00001,
+      "gamma": [1.0, 1.0, 0.5, 1.5]
+    },
+    {
+      "name": "random-seed-2718-4x3",
+      "shape": [4, 3],
+      "input": {"pattern": "random", "seed": 2718, "low": -4.0, "high": 4.0},
+      "epsilon": 0.00001,
+      "gamma": {"pattern": "random", "seed": 314, "low": 0.5, "high": 1.5}
+    }
+  ]
+}

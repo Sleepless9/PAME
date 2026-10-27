@@ -43,4 +43,8 @@
 uint64_t ztt_llm_rope_fp32_tile(const float *input, const float *angles,
                                 float *output);
 
+/* Compact rows x head_dim wrapper around the AME 4x4 tile primitive. */
+uint64_t ztt_rope_fp32(const float *input, const float *angles,
+                       unsigned rows, unsigned head_dim, float *output);
+
 #endif

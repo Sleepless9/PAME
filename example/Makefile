@@ -64,6 +64,7 @@ help:
 	@echo
 	@echo "Each case keeps a uniform main.c entry point and local operators.c source."
 	@echo "Custom selection: make gemm_fp32 GOLDEN=host|reference MATRIX_INPUT=... [MATRIX_REFERENCE=...]"
+	@echo "Operator JSON cases and metrics: see OPERATOR_CASES.md"
 	@echo
 	@echo "Default toolchain: ../toolchain/install (run ../scripts/build_toolchain.sh first)"
 	@echo

@@ -33,11 +33,13 @@
 #include <stdint.h>
 
 #include "operators.h"
-#include "ztt_llm_case.h"
+#include "ztt_operator_case.h"
 
 _Static_assert(ZTT_LLM_TILE == 4, "RoPE uses Ztt FP32 4x4 tiles");
 
-static float ztt_llm_output[ZTT_LLM_TILE_ELEMENTS] ZTT_LLM_ALIGNED;
+static float ztt_operator_outputs[ZTT_OPERATOR_CASE_COUNT]
+                                 [ZTT_OPERATOR_MAX_OUTPUT_ELEMENTS]
+                                 ZTT_LLM_ALIGNED;
 
 uint64_t
 ztt_llm_rope_fp32_tile(const float *input, const float *angles, float *output)
@@ -103,23 +105,36 @@ ztt_llm_rope_fp32_tile(const float *input, const float *angles, float *output)
 }
 
 uint64_t
-ztt_llm_run_case(struct ztt_llm_case_result *result)
+ztt_rope_fp32(const float *input, const float *angles, unsigned rows,
+              unsigned head_dim, float *output)
 {
-    float input[ZTT_LLM_TILE_ELEMENTS] ZTT_LLM_ALIGNED;
-    float angles[ZTT_LLM_TILE_ELEMENTS] ZTT_LLM_ALIGNED;
-    /* Four positions (0..3), head_dim=4, base=10000:
-     * inverse frequencies are [1, 0.01], each repeated for its pair. */
-    for (unsigned row = 0; row < ZTT_LLM_TILE; ++row) {
-        for (unsigned col = 0; col < ZTT_LLM_TILE; ++col) {
-            const unsigned i = row * ZTT_LLM_TILE + col;
-            input[i] = (float)((int)i - 7) * 0.25f;
-            angles[i] = (float)row * (col < 2 ? 1.0f : 0.01f);
-        }
-    }
+    if (!input || !angles || !output || rows == 0 || rows > ZTT_LLM_TILE ||
+        head_dim == 0 || head_dim > ZTT_LLM_TILE || head_dim % 2 != 0)
+        return ZTT_OPERATOR_INVALID_ARGUMENT;
 
-    result->status = ztt_llm_rope_fp32_tile(input, angles, ztt_llm_output);
-    result->output = ztt_llm_output;
-    result->element_count = ZTT_LLM_TILE_ELEMENTS;
-    result->element_bytes = sizeof(ztt_llm_output[0]);
-    return result->status;
+    float tile[ZTT_LLM_TILE_ELEMENTS] ZTT_LLM_ALIGNED;
+    const uint64_t status = ztt_llm_rope_fp32_tile(input, angles, tile);
+    for (unsigned row = 0; row < rows; ++row)
+        for (unsigned col = 0; col < head_dim; ++col)
+            output[row * head_dim + col] =
+                tile[row * ZTT_LLM_TILE + col];
+    return status;
+}
+
+uint64_t
+ztt_operator_run_suite(struct ztt_operator_suite_result *result)
+{
+    uint64_t status = 0;
+    result->case_count = ZTT_OPERATOR_CASE_COUNT;
+    for (unsigned i = 0; i < ZTT_OPERATOR_CASE_COUNT; ++i) {
+        const struct ztt_generated_rope_case *test = &ztt_operator_cases[i];
+        const uint64_t case_status = ztt_rope_fp32(
+            test->input, test->angles, test->rows, test->head_dim,
+            ztt_operator_outputs[i]);
+        result->cases[i] = (struct ztt_operator_case_result){
+            test->name, ztt_operator_outputs[i],
+            test->rows * test->head_dim, sizeof(float), case_status};
+        status |= case_status;
+    }
+    return status;
 }

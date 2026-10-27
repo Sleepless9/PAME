@@ -26,7 +26,11 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-CASE_BINARY := test_llm_rmsnormL
-CASE_DESCRIPTION := RMSNorm square, row reduction, sqrt and reciprocal
-REQUIRED_MNEMONICS := mmul.ew mreduceadd.row msqrt.ew mrec.ew
+CASE_BINARY := test_llm_rmsnorm
+CASE_DESCRIPTION := FP32 RMSNorm with epsilon and per-column gamma
+REQUIRED_MNEMONICS := mmul.ew mreduceadd.row madd.ew msqrt.ew mrec.ew
+OPERATOR_CONFIG := $(CURDIR)/config/cases.json
+HOST_LDLIBS += -lm
 include ../common/case_rules.mk
+
+$(HOST_BINARY) $(TARGET_BINARY): operators.h

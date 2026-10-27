@@ -29,6 +29,7 @@
 CASE_BINARY := test_llm_rope
 CASE_DESCRIPTION := FP32 interleaved rotary position embedding (RoPE)
 REQUIRED_MNEMONICS := mcolgather.ew mcos.ew msin.ew mmul.ew madd.ew
+OPERATOR_CONFIG := $(CURDIR)/config/cases.json
 HOST_LDLIBS += -lm
 include ../common/case_rules.mk
 

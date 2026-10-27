@@ -1,0 +1,32 @@
+{
+  "operator": "softmax",
+  "atol": 0.00001,
+  "rtol": 0.0001,
+  "cases": [
+    {
+      "name": "zeros-2x2",
+      "shape": [2, 2],
+      "input": {"pattern": "zeros"}
+    },
+    {
+      "name": "constant-3x4",
+      "shape": [3, 4],
+      "input": {"pattern": "constant", "value": 1.375}
+    },
+    {
+      "name": "mixed-noninteger-4x4",
+      "shape": [4, 4],
+      "input": {"pattern": "mixed"}
+    },
+    {
+      "name": "extreme-2x4",
+      "shape": [2, 4],
+      "input": {"pattern": "extreme", "low": -16.0, "high": 16.0, "middle": 0.25}
+    },
+    {
+      "name": "random-seed-1729-4x4",
+      "shape": [4, 4],
+      "input": {"pattern": "random", "seed": 1729, "low": -3.5, "high": 3.5}
+    }
+  ]
+}
