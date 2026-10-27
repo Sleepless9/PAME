@@ -38,7 +38,8 @@ CASES := \
 	mha \
 	ffn \
 	rope \
-	rmsnorm
+	rmsnorm \
+	qwen3_0_6b
 
 BUILD_DIR := $(CURDIR)/build
 SUITE_REPORT := $(BUILD_DIR)/reports/EXAMPLE_REPORT.md

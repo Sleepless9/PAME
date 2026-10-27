@@ -57,7 +57,7 @@ from m5.objects import (
     VoltageDomain,
 )
 from m5.objects.BaseMinorCPU import makeMinorDefaultFUPool
-from m5.objects.RiscvCPU import RiscvMinorCPU
+from m5.objects.RiscvCPU import RiscvAtomicSimpleCPU, RiscvMinorCPU
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -65,7 +65,7 @@ parser.add_argument(
     required=True,
     help="bare-metal ELF and arguments",
 )
-parser.add_argument("--cpu", choices=("minor",), default="minor")
+parser.add_argument("--cpu", choices=("minor", "atomic"), default="minor")
 parser.add_argument("--mem-size", default="128MiB")
 parser.add_argument(
     "--matrix-op-lat",
@@ -90,7 +90,7 @@ memory_start = 0x7FFFF000
 reset_vector_size = 0x1000
 
 system = RiscvSystem()
-system.mem_mode = "timing"
+system.mem_mode = "atomic" if args.cpu == "atomic" else "timing"
 system.mem_ranges = [
     AddrRange(
         start=memory_start,
@@ -139,14 +139,19 @@ system.cpu_clk_domain = SrcClockDomain(
     clock="1GHz", voltage_domain=VoltageDomain()
 )
 
-system.cpu = RiscvMinorCPU(
-    clk_domain=system.cpu_clk_domain,
-    cpu_id=0,
-    executeFuncUnits=makeMinorDefaultFUPool(
-        matrix_op_lat=args.matrix_op_lat,
-        vector_op_lat=args.vector_op_lat,
-    ),
-)
+if args.cpu == "atomic":
+    system.cpu = RiscvAtomicSimpleCPU(
+        clk_domain=system.cpu_clk_domain, cpu_id=0
+    )
+else:
+    system.cpu = RiscvMinorCPU(
+        clk_domain=system.cpu_clk_domain,
+        cpu_id=0,
+        executeFuncUnits=makeMinorDefaultFUPool(
+            matrix_op_lat=args.matrix_op_lat,
+            vector_op_lat=args.vector_op_lat,
+        ),
+    )
 system.cpu.icache_port = system.membus.cpu_side_ports
 system.cpu.dcache_port = system.membus.cpu_side_ports
 system.cpu.createInterruptController()

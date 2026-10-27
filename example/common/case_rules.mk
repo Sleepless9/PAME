@@ -58,7 +58,9 @@ BUILD_CONFIG := $(GENERATED_DIR)/build-config.txt
 
 SOURCE := $(CASE_DIR)/main.c
 OPERATOR_SOURCE := $(CASE_DIR)/operators.c
-SOURCES := $(SOURCE) $(OPERATOR_SOURCE)
+HOST_SOURCES ?= $(SOURCE) $(OPERATOR_SOURCE)
+TARGET_SOURCES ?= $(SOURCE) $(OPERATOR_SOURCE)
+CASE_DEPENDENCIES ?=
 HOST_BINARY := $(HOST_DIR)/$(CASE_BINARY)
 TARGET_BINARY := $(TARGET_DIR)/$(CASE_BINARY)
 HOST_REPORT := $(REPORT_DIR)/$(CASE_BINARY).host.txt
@@ -136,12 +138,13 @@ GEM5 ?= $(if $(AMEGEM5_GEM5),$(AMEGEM5_GEM5),$(AMEGEM5_ROOT)/build/RISCV/gem5.op
 MEM_SIZE ?= 128MiB
 MATRIX_OP_LAT ?= 16
 VECTOR_OP_LAT ?= 6
+GEM5_CPU ?= minor
 
 COMMON_HEADERS := $(wildcard $(COMMON_DIR)/*.h)
 RUNTIME_SOURCES := $(RUNTIME_DIR)/crt0.S $(RUNTIME_DIR)/runtime.c
 RUNTIME_HEADERS := $(wildcard $(RUNTIME_DIR)/include/*.h)
 
-HOST_CFLAGS := -O2 -g -Wall -Wextra -Werror -I$(COMMON_DIR) $(MATRIX_BUILD_FLAGS)
+HOST_CFLAGS := -O2 -g -Wall -Wextra -Werror -I$(COMMON_DIR) $(MATRIX_BUILD_FLAGS) $(HOST_EXTRA_CFLAGS)
 TARGET_CFLAGS := \
 	-target riscv64-unknown-elf \
 	-resource-dir $(CLANG_RESOURCE_DIR) \
@@ -152,12 +155,14 @@ TARGET_CFLAGS := \
 	-ffreestanding -fno-builtin -mcmodel=medany \
 	-ffunction-sections -fdata-sections \
 	-fno-vectorize -fno-slp-vectorize -ffp-contract=off \
-	-I$(COMMON_DIR) -I$(RUNTIME_DIR)/include $(MATRIX_BUILD_FLAGS)
+	-I$(COMMON_DIR) -I$(RUNTIME_DIR)/include $(MATRIX_BUILD_FLAGS) \
+	$(TARGET_EXTRA_CFLAGS)
+TARGET_LINKER_SCRIPT ?= $(RUNTIME_DIR)/link.ld
 TARGET_LDFLAGS := \
 	$(TARGET_LD_MODE) \
 	-nostdlib -nostartfiles -static \
-	-Wl,-T,$(RUNTIME_DIR)/link.ld \
-	-Wl,--gc-sections
+	-Wl,-T,$(TARGET_LINKER_SCRIPT) \
+	-Wl,--gc-sections $(TARGET_EXTRA_LDFLAGS)
 
 .DEFAULT_GOAL := all
 .PHONY: all test run audit report clean force check-host-tools check-target-tools check-gem5
@@ -220,13 +225,13 @@ $(HOST_BINARY):
 $(TARGET_BINARY):
 	@test -f $@ || { echo "[FAIL] --no-build binary is missing: $@"; exit 1; }
 else
-$(HOST_BINARY): $(SOURCES) $(COMMON_HEADERS) $(GENERATED_HEADERS) $(BUILD_CONFIG) | check-host-tools
+$(HOST_BINARY): $(HOST_SOURCES) $(CASE_DEPENDENCIES) $(COMMON_HEADERS) $(GENERATED_HEADERS) $(BUILD_CONFIG) | check-host-tools
 	@mkdir -p $(HOST_DIR) $(LOG_DIR)
-	$(HOST_CC) $(HOST_CFLAGS) $(SOURCES) $(HOST_LDLIBS) -o $@ 2>&1 | tee $(LOG_DIR)/host-build.log
+	$(HOST_CC) $(HOST_CFLAGS) $(HOST_SOURCES) $(HOST_LDLIBS) -o $@ 2>&1 | tee $(LOG_DIR)/host-build.log
 
-$(TARGET_BINARY): $(SOURCES) $(COMMON_HEADERS) $(GENERATED_HEADERS) $(BUILD_CONFIG) $(RUNTIME_SOURCES) $(RUNTIME_HEADERS) $(RUNTIME_DIR)/link.ld | check-target-tools
+$(TARGET_BINARY): $(TARGET_SOURCES) $(CASE_DEPENDENCIES) $(COMMON_HEADERS) $(GENERATED_HEADERS) $(BUILD_CONFIG) $(RUNTIME_SOURCES) $(RUNTIME_HEADERS) $(TARGET_LINKER_SCRIPT) | check-target-tools
 	@mkdir -p $(TARGET_DIR) $(LOG_DIR)
-	$(CLANG) $(TARGET_CFLAGS) $(RUNTIME_SOURCES) $(SOURCES) \
+	$(CLANG) $(TARGET_CFLAGS) $(RUNTIME_SOURCES) $(TARGET_SOURCES) \
 		$(TARGET_LDFLAGS) $(TARGET_LIBGCC) -o $@ 2>&1 | tee $(LOG_DIR)/target-build.log
 endif
 
@@ -268,7 +273,7 @@ $(HOST_REPORT): force $(HOST_BINARY)
 $(MINOR_REPORT): force $(TARGET_BINARY) | check-gem5
 	@mkdir -p $(REPORT_DIR) $(LOG_DIR) $(M5OUT_DIR)
 	$(GEM5) -d $(M5OUT_DIR) $(EXAMPLE_ROOT)/ame_config.py \
-		--cpu minor --mem-size $(MEM_SIZE) \
+		--cpu $(GEM5_CPU) --mem-size $(MEM_SIZE) \
 		--matrix-op-lat $(MATRIX_OP_LAT) \
 		--vector-op-lat $(VECTOR_OP_LAT) \
 		--cmd '$(TARGET_BINARY) $(MINOR_REPORT)' \
