@@ -84,6 +84,10 @@ class Decode : public Named
      *  there is room in the output to contain its processed data */
     bool processMoreThanOneInput;
 
+    /** Preserve compute macro-ops for the external instruction queue. */
+    bool offloadRVV;
+    bool offloadAME;
+
   public:
     /* Public for Pipeline to be able to pass it to Fetch2 */
     std::vector<InputBuffer<ForwardInstData>> inputBuffer;

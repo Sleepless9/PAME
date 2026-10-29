@@ -39,6 +39,10 @@ DebugFlag('IntPin')
 DebugFlag('IsaFake')
 DebugFlag('DMA')
 
+SimObject('SPMVirtDma.py', sim_objects=['SPMVirtDma'])
+Source('spm_virt_dma.cc')
+DebugFlag('SPMVirtDma', 'Descriptor and transfer activity for SPMVirtDma')
+
 SimObject('Platform.py', sim_objects=['Platform'])
 Source('platform.cc')
 

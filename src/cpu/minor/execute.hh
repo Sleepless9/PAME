@@ -52,6 +52,7 @@
 #include "cpu/minor/buffers.hh"
 #include "cpu/minor/cpu.hh"
 #include "cpu/minor/func_unit.hh"
+#include "cpu/minor/inst_queue.hh"
 #include "cpu/minor/lsq.hh"
 #include "cpu/minor/pipe_data.hh"
 #include "cpu/minor/scoreboard.hh"
@@ -114,9 +115,18 @@ class Execute : public Named
      *  of the in flight insts queue if their dependencies are met */
     bool allowEarlyMemIssue;
 
+    /** RVV memory timing is modeled externally; commit only ISA effects. */
+    bool rvvFunctionalMemory;
+
     /** The FU index of the non-existent costless FU for instructions
      *  which pass the MinorDynInst::isNoCostInst test */
     unsigned int noCostFUIndex;
+
+    /** Pseudo-FU index used only for scoreboard ownership reporting. */
+    unsigned int instQueueFUIndex;
+
+    /** Boundary queue for RVV/AME components. */
+    MinorInstQueue instQueue;
 
     /** Dcache port to pass on to the CPU.  Execute owns this */
     LSQ lsq;
@@ -163,6 +173,7 @@ class Execute : public Named
 
         ExecuteThreadInfo(const ExecuteThreadInfo& other) :
             inputIndex(other.inputIndex),
+            serialOffload(other.serialOffload),
             lastCommitWasEndOfMacroop(other.lastCommitWasEndOfMacroop),
             instsBeingCommitted(other.instsBeingCommitted),
             streamSeqNum(other.streamSeqNum),
@@ -179,6 +190,9 @@ class Execute : public Named
         /** Index that we've completed upto in getInput data.  We can say we're
          *  popInput when this equals getInput()->width() */
         unsigned int inputIndex;
+
+        /** Block younger issue until a serializing offload retires/cancels. */
+        InstSeqNum serialOffload = 0;
 
         /** The last commit was the end of a full instruction so an interrupt
          *  can safely happen */
@@ -252,6 +266,19 @@ class Execute : public Named
      *  Any faults raised are actually invoke-d by this function. */
     bool executeMemRefInst(MinorDynInstPtr inst, BranchData &branch,
         bool &failed_predicate, Fault &fault);
+
+    /** Try to dispatch a compute instruction through the external queue. */
+    bool issueInstQueue(MinorDynInstPtr inst);
+
+    /** Apply a returned completion at Minor's in-order commit point. */
+    bool commitInstQueue(MinorDynInstPtr inst, BranchData &branch,
+                         Fault &fault, bool &committed,
+                         bool &completed_mem_issue);
+
+    static InstQueueKey instQueueKey(const MinorDynInstPtr &inst)
+    {
+        return {inst->id.threadId, inst->id.execSeqNum};
+    }
 
     /** Has an interrupt been raised */
     bool isInterrupted(ThreadID thread_id) const;
@@ -336,6 +363,9 @@ class Execute : public Named
     /** To allow ExecContext to find the LSQ */
     LSQ &getLSQ() { return lsq; }
 
+    /** Boundary exposed through Pipeline and MinorCPU to RVV/AME components. */
+    MinorInstQueue &getInstQueue() { return instQueue; }
+
     /** Does the given instruction have the right stream sequence number
      *  to be committed? */
     bool instIsRightStream(MinorDynInstPtr inst);
@@ -361,6 +391,11 @@ class Execute : public Named
     {
         IssueStats(MinorCPU *cpu);
         statistics::Vector2d issuedInstType;
+        statistics::Scalar offloadQueueFullStalls;
+        statistics::Scalar offloadSourceStalls;
+        statistics::Scalar offloadSerializeBeforeStalls;
+        statistics::Scalar offloadSerializeAfterStalls;
+        statistics::Scalar offloadCompletionWaits;
     } issueStats;
 };
 

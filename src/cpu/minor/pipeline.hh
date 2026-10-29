@@ -137,6 +137,9 @@ class Pipeline : public Ticked
     /** Return the DcachePort belonging to Execute for the CPU */
     MinorCPU::MinorCPUPort &getDataPort();
 
+    /** Return Minor's RVV/AME instruction dispatch boundary. */
+    MinorInstQueue &getInstQueue() { return execute.getInstQueue(); }
+
     /** To give the activity recorder to the CPU */
     MinorActivityRecorder *getActivityRecorder() { return &activityRecorder; }
 };

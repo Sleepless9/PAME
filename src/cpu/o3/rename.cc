@@ -153,6 +153,9 @@ Rename::RenameStats::RenameStats(statistics::Group *parent)
                "Number of HB maps that are undone due to squashing"),
       ADD_STAT(serializing, statistics::units::Count::get(),
                "count of serializing insts renamed"),
+      ADD_STAT(computeQueueRelaxedSerializing,
+               statistics::units::Count::get(),
+               "compute commands queue-ordered instead of draining the ROB"),
       ADD_STAT(tempSerializing, statistics::units::Count::get(),
                "count of temporary serializing insts renamed"),
       ADD_STAT(skidInsts, statistics::units::Count::get(),
@@ -699,7 +702,29 @@ Rename::renameInsts(ThreadID tid)
 
         // Check here to make sure there are enough destination registers
         // to rename to.  Otherwise block.
-        if (!renameMap[tid]->canRename(inst)) {
+        bool can_rename = renameMap[tid]->canRename(inst);
+        if (!can_rename && cpu->isAmeOffload(inst->staticInst)) {
+            // AME-owned MRF/ACC names keep their architectural mapping.
+            // Only the remaining scalar/vector destinations consume O3
+            // physical registers.
+            can_rename = true;
+            for (int type = IntRegClass; type <= MiscRegClass; ++type) {
+                unsigned required = 0;
+                for (int dest = 0; dest < inst->numDestRegs(); ++dest) {
+                    const RegId reg = inst->destRegIdx(dest);
+                    if (reg.classValue() == type &&
+                        !cpu->isAmeStructuralReg(reg)) {
+                        ++required;
+                    }
+                }
+                if (required > renameMap[tid]->numFreeEntries(
+                                   static_cast<RegClassType>(type))) {
+                    can_rename = false;
+                    break;
+                }
+            }
+        }
+        if (!can_rename) {
             DPRINTF(Rename,
                     "Blocking due to "
                     " lack of free physical registers to rename to.\n");
@@ -716,6 +741,19 @@ Rename::renameInsts(ThreadID tid)
             handleMiscRegWaW(inst, tid);
         }
 
+        // The external command queue and accelerator scoreboards order pure
+        // descriptors.  Ownership transitions and scalar read-back remain
+        // architectural barriers.
+        const bool compute_queue_ordered_descriptor =
+            cpu->isComputeOffload(inst->staticInst) &&
+            !cpu->hasAmeScalarResult(inst) &&
+            inst->staticInst->getName().find("acquire") == std::string::npos &&
+            inst->staticInst->getName().find("release") == std::string::npos;
+        if (compute_queue_ordered_descriptor &&
+            (inst->isSerializeBefore() || inst->isSerializeAfter())) {
+            stats.computeQueueRelaxedSerializing++;
+        }
+
         // Handle serializeAfter/serializeBefore instructions.
         // serializeAfter marks the next instruction as serializeBefore.
         // serializeBefore makes the instruction wait in rename until the ROB
@@ -726,7 +764,8 @@ Rename::renameInsts(ThreadID tid)
         // instructions.  This is mainly due to lack of support for
         // out-of-order operations of either of those classes of
         // instructions.
-        if (inst->isSerializeBefore() && !inst->isSerializeHandled()) {
+        if (!compute_queue_ordered_descriptor && inst->isSerializeBefore() &&
+            !inst->isSerializeHandled()) {
             DPRINTF(Rename, "Serialize before instruction encountered.\n");
 
             if (!inst->isTempSerializeBefore()) {
@@ -745,7 +784,8 @@ Rename::renameInsts(ThreadID tid)
             blockThisCycle = true;
 
             break;
-        } else if ((inst->isStoreConditional() || inst->isSerializeAfter()) &&
+        } else if (!compute_queue_ordered_descriptor &&
+                   (inst->isStoreConditional() || inst->isSerializeAfter()) &&
                    !inst->isSerializeHandled()) {
             DPRINTF(Rename, "Serialize after instruction encountered.\n");
 
@@ -1111,7 +1151,11 @@ Rename::renameSrcRegs(const DynInstPtr &inst, ThreadID tid)
         inst->renameSrcReg(src_idx, renamed_reg);
 
         // See if the register is ready or not.
-        if (scoreboard->getReg(renamed_reg)) {
+        if (cpu->isAmeOffload(inst->staticInst) &&
+            cpu->isAmeStructuralReg(flat_reg)) {
+            // Matrix dependencies are maintained by the AME scoreboard.
+            inst->markSrcRegReady(src_idx);
+        } else if (scoreboard->getReg(renamed_reg)) {
             DPRINTF(Rename,
                     "[tid:%i] "
                     "Register %d (flat: %d) (%s) is ready.\n",
@@ -1146,6 +1190,15 @@ Rename::renameDestRegs(const DynInstPtr &inst, ThreadID tid)
 
         RegId flat_dest_regid = dest_reg.flatten(*isa);
         flat_dest_regid.setNumPinnedWrites(dest_reg.getNumPinnedWrites());
+
+        if (cpu->isAmeOffload(inst->staticInst) &&
+            cpu->isAmeStructuralReg(flat_dest_regid)) {
+            PhysRegIdPtr fixed = map->lookup(flat_dest_regid);
+            inst->flattenedDestIdx(dest_idx, flat_dest_regid);
+            inst->renameDestReg(dest_idx, fixed, fixed);
+            ++stats.renamedOperands;
+            continue;
+        }
 
         rename_result = map->rename(flat_dest_regid);
 

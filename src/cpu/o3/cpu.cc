@@ -43,6 +43,7 @@
 
 #include "cpu/o3/cpu.hh"
 
+#include "arch/riscv/regs/matrix.hh"
 #include "cpu/activity.hh"
 #include "cpu/checker/cpu.hh"
 #include "cpu/checker/thread_context.hh"
@@ -108,6 +109,13 @@ CPU::CPU(const BaseO3CPUParams &params)
       iewQueue(params.backComSize, params.forwardComSize),
       activityRec(name(), NumStages,
                   params.backComSize + params.forwardComSize, params.activity),
+      computeInstQueue(name() + ".computeInstQueue",
+          params.computeInstQueueSize, params.computeOffloadRVV,
+          params.computeOffloadAME,
+          [this]() {
+              wakeCPU();
+              activityThisCycle();
+          }),
 
       globalSeqNum(1),
       globalFTSeqNum(1),
@@ -320,6 +328,100 @@ CPU::CPU(const BaseO3CPUParams &params)
         fatal("O3CPU %s has no interrupt controller.\n"
               "Ensure createInterruptController() is called.\n", name());
     }
+}
+
+bool
+CPU::isAmeStructuralReg(const RegId &reg) const
+{
+    return reg.is(MatRegClass) && reg.index() >= RiscvISA::ZttMatRegBase &&
+        reg.index() < RiscvISA::NumMatRegs;
+}
+
+bool
+CPU::hasAmeScalarResult(const DynInstPtr &inst) const
+{
+    if (!isAmeOffload(inst->staticInst))
+        return false;
+    for (int index = 0; index < inst->numDestRegs(); ++index) {
+        const RegClassType type = inst->destRegIdx(index).classValue();
+        if (type == IntRegClass || type == FloatRegClass ||
+            type == CCRegClass || type == MiscRegClass) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+CPU::dispatchComputeOffload(const DynInstPtr &inst)
+{
+    if (!computeInstQueue.canDispatch())
+        return false;
+
+    const minor::InstQueueKey key{inst->threadNumber, inst->seqNum};
+    auto packet = computeInstQueue.makePacket(
+        inst->staticInst, inst->threadNumber, inst->seqNum,
+        inst->pcState().instAddr(),
+        [inst](unsigned operand) {
+            return inst->getRegOperand(inst->staticInst.get(), operand);
+        },
+        [inst](unsigned operand) {
+            RiscvISA::MatRegContainer value;
+            value.zero();
+            inst->getRegOperand(inst->staticInst.get(), operand, &value);
+            const auto rows = value.as<uint8_t>();
+            uint32_t raw = 0;
+            for (unsigned byte = 0; byte < sizeof(raw); ++byte)
+                raw |= static_cast<uint32_t>(rows[0][byte]) << (byte * 8);
+            return raw;
+        });
+    if (!computeInstQueue.dispatch(std::move(packet)))
+        return false;
+    const auto [it, inserted] = computeOffloads.emplace(key, inst);
+    panic_if(!inserted,
+             "Duplicate O3 compute offload tid=%d seq=%llu",
+             key.threadId, key.execSeqNum);
+    return true;
+}
+
+void
+CPU::completeComputeOffloads()
+{
+    for (auto it = computeOffloads.begin(); it != computeOffloads.end();) {
+        const auto key = it->first;
+        const DynInstPtr inst = it->second;
+        if (!computeInstQueue.hasCompletion(key)) {
+            ++it;
+            continue;
+        }
+        if (!inst->isSquashed()) {
+            inst->getFault() = computeInstQueue.getCompletion(key).fault;
+            inst->setComputeOffloadFunctionalMemory(true);
+            if (inst->getFault() == NoFault) {
+                inst->execute();
+                if (!inst->readPredicate())
+                    inst->forwardOldRegs();
+            }
+            inst->setComputeOffloadFunctionalMemory(false);
+            inst->setExecuted();
+            iew.instToCommit(inst);
+            iew.updateExeInstStats(inst);
+            activityThisCycle();
+        }
+        computeInstQueue.retire(key);
+        it = computeOffloads.erase(it);
+    }
+}
+
+void
+CPU::cancelComputeOffload(const DynInstPtr &inst)
+{
+    const minor::InstQueueKey key{inst->threadNumber, inst->seqNum};
+    auto it = computeOffloads.find(key);
+    if (it == computeOffloads.end())
+        return;
+    computeInstQueue.cancel(key);
+    computeOffloads.erase(it);
 }
 
 void
@@ -1265,6 +1367,7 @@ void
 CPU::squashInstIt(const ListIt &instIt, ThreadID tid)
 {
     if ((*instIt)->threadNumber == tid) {
+        cancelComputeOffload(*instIt);
         DPRINTF(O3CPU, "Squashing instruction, "
                 "[tid:%i] [sn:%lli] PC %s\n",
                 (*instIt)->threadNumber,

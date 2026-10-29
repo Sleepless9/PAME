@@ -475,6 +475,31 @@ class BaseMinorCPU(BaseCPU):
         " the in flight insts queue",
     )
 
+    executeOffloadRVV = Param.Bool(
+        False,
+        "Dispatch decoded RVV instructions through Minor's external"
+        " instruction queue instead of its functional units",
+    )
+    executeOffloadAME = Param.Bool(
+        False,
+        "Dispatch decoded Ztt/AME instructions through Minor's external"
+        " instruction queue instead of its functional units and LSQ",
+    )
+    executeOffloadLocalMemoryBase = Param.Addr(
+        0, "Bare-metal local SPM base for offload commit checks"
+    )
+    executeOffloadLocalMemorySize = Param.MemorySize(
+        "0B", "Local SPM size; zero disables commit range checks"
+    )
+    executeOffloadRVVFunctionalMemory = Param.Bool(
+        False,
+        "Commit RVV memory effects functionally after accelerator timing "
+        "completion instead of issuing them through Minor's LSQ",
+    )
+    executeInstQueueSize = Param.Unsigned(
+        16, "Maximum number of external RVV/AME instructions in flight"
+    )
+
     enableIdling = Param.Bool(
         True, "Enable cycle skipping when the processor is idle\n"
     )
@@ -489,3 +514,20 @@ class BaseMinorCPU(BaseCPU):
     def addCheckerCpu(self):
         print("Checker not yet supported by MinorCPU")
         exit(1)
+
+    def addRvvEngine(self, **kwargs):
+        """Attach the independent RVV timing engine to this MinorCPU."""
+        from m5.objects.RVVEngine import RVVEngine
+
+        self.rvv_engine = RVVEngine(cpu=self, **kwargs)
+        self.executeOffloadRVV = True
+        self.executeOffloadRVVFunctionalMemory = kwargs.get(
+            "use_timing_memory", False
+        )
+
+    def addAmeEngine(self, **kwargs):
+        """Attach the resource-accurate AME timing engine to this MinorCPU."""
+        from m5.objects.AMEEngine import AMEEngine
+
+        self.ame_engine = AMEEngine(cpu=self, **kwargs)
+        self.executeOffloadAME = True

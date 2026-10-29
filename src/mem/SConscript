@@ -44,6 +44,7 @@ SimObject('CommMonitor.py', sim_objects=['CommMonitor'])
 Source('comm_monitor.cc')
 
 SimObject('AbstractMemory.py', sim_objects=['AbstractMemory'])
+SimObject('BankedScratchpad.py', sim_objects=['BankedScratchpad'])
 SimObject('AddrMapper.py', sim_objects=['AddrMapper', 'RangeAddrMapper'])
 SimObject('Bridge.py', sim_objects=['BridgeBase', 'Bridge'])
 SimObject('SysBridge.py', sim_objects=['SysBridge'])
@@ -71,6 +72,7 @@ SimObject('PortTerminator.py', sim_objects=['PortTerminator'])
 SimObject('ThreadBridge.py', sim_objects=['ThreadBridge'])
 
 Source('abstract_mem.cc')
+Source('banked_scratchpad.cc')
 Source('addr_mapper.cc')
 Source('backdoor_manager.cc')
 Source('bridge.cc')
@@ -144,6 +146,7 @@ CompoundFlag('XBar', ['BaseXBar', 'CoherentXBar', 'NoncoherentXBar',
                       'SnoopFilter'])
 
 DebugFlag('Bridge')
+DebugFlag('BankedSPM', 'Banked scratchpad requests and arbitration')
 DebugFlag('CommMonitor')
 DebugFlag('DRAM')
 DebugFlag('DRAMPower')

@@ -65,6 +65,10 @@
 #include "debug/DynInst.hh"
 #include "debug/IQ.hh"
 #include "debug/O3PipeView.hh"
+#include "mem/se_translating_port_proxy.hh"
+#include "mem/translating_port_proxy.hh"
+#include "params/BaseO3CPU.hh"
+#include "sim/full_system.hh"
 #include "mem/request.hh"
 
 namespace gem5
@@ -428,6 +432,53 @@ DynInst::trap(const Fault &fault)
 }
 
 Fault
+DynInst::readMem(Addr addr, uint8_t *data, unsigned size,
+                 Request::Flags flags,
+                 const std::vector<bool> &byte_enable)
+{
+    panic_if(!computeOffloadFunctionalMemory,
+             "O3 functional read requested outside accelerator completion");
+    assert(byte_enable.size() == size);
+
+    const auto &params =
+        static_cast<const BaseO3CPUParams &>(cpu->params());
+    auto access = [&](PortProxy &proxy) -> Fault {
+        unsigned offset = 0;
+        while (offset < size) {
+            while (offset < size && !byte_enable[offset])
+                ++offset;
+            const unsigned begin = offset;
+            while (offset < size && byte_enable[offset])
+                ++offset;
+            if (begin == offset)
+                continue;
+            const Addr address = addr + begin;
+            const unsigned bytes = offset - begin;
+            const Addr local_base = params.computeOffloadLocalMemoryBase;
+            const Addr local_size = params.computeOffloadLocalMemorySize;
+            panic_if(local_size &&
+                     (address < addr || address < local_base ||
+                      bytes > local_size ||
+                      address - local_base > local_size - bytes),
+                     "O3 accelerator read outside local SPM: "
+                     "addr=%#x bytes=%u pc=%#x",
+                     address, bytes, pcState().instAddr());
+            if (!proxy.tryReadBlob(address, data + begin, bytes))
+                return std::make_shared<GenericPageTableFault>(address);
+        }
+        return NoFault;
+    };
+
+    if (FullSystem) {
+        TranslatingPortProxy proxy(thread->getTC(), flags);
+        return access(proxy);
+    }
+    SETranslatingPortProxy proxy(
+        thread->getTC(), SETranslatingPortProxy::Never, flags);
+    return access(proxy);
+}
+
+Fault
 DynInst::initiateMemRead(Addr addr, unsigned size, Request::Flags flags,
                                const std::vector<bool> &byte_enable)
 {
@@ -454,6 +505,46 @@ DynInst::writeMem(uint8_t *data, unsigned size, Addr addr,
                         const std::vector<bool> &byte_enable)
 {
     assert(byte_enable.size() == size);
+    if (computeOffloadFunctionalMemory) {
+        panic_if(!data || res,
+                 "O3 accelerator functional commit supports plain stores");
+        const auto &params =
+            static_cast<const BaseO3CPUParams &>(cpu->params());
+        auto access = [&](PortProxy &proxy) -> Fault {
+            unsigned offset = 0;
+            while (offset < size) {
+                while (offset < size && !byte_enable[offset])
+                    ++offset;
+                const unsigned begin = offset;
+                while (offset < size && byte_enable[offset])
+                    ++offset;
+                if (begin == offset)
+                    continue;
+                const Addr address = addr + begin;
+                const unsigned bytes = offset - begin;
+                const Addr local_base = params.computeOffloadLocalMemoryBase;
+                const Addr local_size = params.computeOffloadLocalMemorySize;
+                panic_if(local_size &&
+                         (address < addr || address < local_base ||
+                          bytes > local_size ||
+                          address - local_base > local_size - bytes),
+                         "O3 accelerator store outside local SPM: "
+                         "addr=%#x bytes=%u pc=%#x",
+                         address, bytes, pcState().instAddr());
+                if (!proxy.tryWriteBlob(address, data + begin, bytes))
+                    return std::make_shared<GenericPageTableFault>(address);
+            }
+            return NoFault;
+        };
+
+        if (FullSystem) {
+            TranslatingPortProxy proxy(thread->getTC(), flags);
+            return access(proxy);
+        }
+        SETranslatingPortProxy proxy(
+            thread->getTC(), SETranslatingPortProxy::Never, flags);
+        return access(proxy);
+    }
     return cpu->pushRequest(
         dynamic_cast<DynInstPtr::PtrType>(this),
         /* st */ false, data, size, addr, flags, res, nullptr,

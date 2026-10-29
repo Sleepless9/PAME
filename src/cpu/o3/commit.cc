@@ -1122,7 +1122,9 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         assert(head_inst->isNonSpeculative() || head_inst->isStoreConditional()
                || head_inst->isReadBarrier() || head_inst->isWriteBarrier()
                || head_inst->isAtomic()
-               || (head_inst->isLoad() && head_inst->strictlyOrdered()));
+               || (head_inst->isLoad() && head_inst->strictlyOrdered())
+               || (cpu->isComputeOffload(head_inst->staticInst) &&
+                   head_inst->isMemRef()));
 
         DPRINTF(Commit,
                 "Encountered a barrier or non-speculative "

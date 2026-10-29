@@ -1,0 +1,60 @@
+# -*- mode:python -*-
+
+Import('*')
+
+if not env['CONF']['USE_RISCV_ISA']:
+    Return()
+
+GTest(
+    'rvv_backend.test',
+    'rvv_backend.test.cc',
+    'completion_tracker.cc',
+    'vector_masku.cc',
+    'vector_sldu.cc',
+    'global_scoreboard.cc',
+    'global_sequencer.cc',
+    'lane_scoreboard.cc',
+    'pipeline.cc',
+    'rvv_context.cc',
+    'rvv_dispatcher.cc',
+    'result_progress.cc',
+    'rvv_types.cc',
+    'vector_fu.cc',
+    'vector_lane.cc',
+    'vector_memory.cc',
+    'vrf_bank.cc',
+    'vrf_mapper.cc',
+    '../../cpu/minor/inst_queue.cc',
+    '../../cpu/reg_class.cc',
+    '../../sim/bufval.cc',
+    with_tag('gem5 simobject'),
+    tags=['riscv isa'],
+)
+
+SimObject('RVVEngine.py', sim_objects=['RVVEngine'], tags=['riscv isa'])
+
+Source('completion_tracker.cc', tags=['riscv isa'])
+Source('vector_masku.cc', tags=['riscv isa'])
+Source('vector_sldu.cc', tags=['riscv isa'])
+Source('engine.cc', tags=['riscv isa'])
+Source('global_scoreboard.cc', tags=['riscv isa'])
+Source('global_sequencer.cc', tags=['riscv isa'])
+Source('lane_scoreboard.cc', tags=['riscv isa'])
+Source('pipeline.cc', tags=['riscv isa'])
+Source('rvv_context.cc', tags=['riscv isa'])
+Source('rvv_dispatcher.cc', tags=['riscv isa'])
+Source('result_progress.cc', tags=['riscv isa'])
+Source('rvv_types.cc', tags=['riscv isa'])
+Source('vector_fu.cc', tags=['riscv isa'])
+Source('vector_lane.cc', tags=['riscv isa'])
+Source('vector_memory.cc', tags=['riscv isa'])
+Source('vrf_bank.cc', tags=['riscv isa'])
+Source('vrf_mapper.cc', tags=['riscv isa'])
+
+DebugFlag('RVVEngine', 'MinorRVV instruction/beat/lane backend timing')
+CompoundFlag('QwenRVVTrace', [
+    'MinorInstQueue', 'PseudoInst'
+])
+CompoundFlag('QwenRVVDetail', [
+    'QwenRVVTrace', 'MinorInstQueue', 'RVVEngine'
+])

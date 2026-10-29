@@ -128,6 +128,9 @@ class VectorNonSplitInst : public RiscvStaticInst
 
     std::string generateDisassembly(
         Addr pc, const loader::SymbolTable *symtab) const override;
+
+    bool hasVectorLength() const override { return true; }
+    uint32_t getVectorLength() const override { return vl; }
 };
 
 class VectorMacroInst : public RiscvMacroInst
@@ -158,6 +161,9 @@ class VectorMacroInst : public RiscvMacroInst
     {
         this->flags[IsVector] = true;
     }
+
+    bool hasVectorLength() const override { return true; }
+    uint32_t getVectorLength() const override { return vl; }
 };
 
 class VectorMicroInst : public RiscvMicroInst
@@ -190,6 +196,9 @@ protected:
     {
         this->flags[IsVector] = true;
     }
+
+    bool hasVectorLength() const override { return true; }
+    uint32_t getVectorLength() const override { return microVl; }
 };
 
 class VectorNopMicroInst : public RiscvMicroInst

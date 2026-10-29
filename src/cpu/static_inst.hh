@@ -239,6 +239,10 @@ class StaticInst : public RefCounted, public StaticInstFlags
 
     virtual uint64_t getEMI() const { return 0; }
 
+    /** Optional decoded vector length consumed by external timing engines. */
+    virtual bool hasVectorLength() const { return false; }
+    virtual uint32_t getVectorLength() const { return 0; }
+
   protected:
 
     /**

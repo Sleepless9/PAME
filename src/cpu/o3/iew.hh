@@ -300,6 +300,8 @@ class IEW
     /** Updates execution stats based on the instruction. */
     void updateExeInstStats(const DynInstPtr &inst);
 
+    friend class CPU;
+
     /** Pointer to main time buffer used for backwards communication. */
     TimeBuffer<TimeStruct> *timeBuffer;
 

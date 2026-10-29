@@ -372,6 +372,9 @@ class DynInst : public ExecContext, public RefCounted
      */
     LSQRequest *savedRequest = nullptr;
 
+    /** Accelerator timing LSUs already modeled these memory transactions. */
+    bool computeOffloadFunctionalMemory = false;
+
     /////////////////////// Checker //////////////////////
     // Need a copy of main request pointer to verify on writes.
     RequestPtr reqToVerify;
@@ -403,6 +406,10 @@ class DynInst : public ExecContext, public RefCounted
     Fault initiateMemRead(Addr addr, unsigned size, Request::Flags flags,
             const std::vector<bool> &byte_enable) override;
 
+    Fault readMem(Addr addr, uint8_t *data, unsigned size,
+                  Request::Flags flags,
+                  const std::vector<bool> &byte_enable) override;
+
     Fault initiateMemMgmtCmd(Request::Flags flags) override;
 
     Fault writeMem(uint8_t *data, unsigned size, Addr addr,
@@ -411,6 +418,12 @@ class DynInst : public ExecContext, public RefCounted
 
     Fault initiateMemAMO(Addr addr, unsigned size, Request::Flags flags,
                          AtomicOpFunctorPtr amo_op) override;
+
+    void setComputeOffloadFunctionalMemory(bool value)
+    { computeOffloadFunctionalMemory = value; }
+
+    bool isComputeOffloadFunctionalMemory() const
+    { return computeOffloadFunctionalMemory; }
 
     /** True if the DTB address translation has started. */
     bool translationStarted() const { return instFlags[TranslationStarted]; }

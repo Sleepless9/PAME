@@ -547,6 +547,12 @@ class InstructionQueue
     /** Moves an instruction to the ready queue if it is ready. */
     void addIfReady(const DynInstPtr &inst);
 
+    /** Preserve program order at the architectural AME command boundary. */
+    bool hasOlderUnissuedAme(const DynInstPtr &inst) const;
+
+    /** Keep AME side effects behind unresolved scalar control flow. */
+    bool hasOlderUnresolvedControl(const DynInstPtr &inst) const;
+
     /** Debugging function to dump all the list sizes, as well as print
      *  out the list of nonspeculative instructions.  Should not be used
      *  in any other capacity, but it has no harmful sideaffects.
@@ -591,6 +597,8 @@ class InstructionQueue
          *  a squash.
          */
         statistics::Scalar squashedNonSpecRemoved;
+        statistics::Scalar ameCommandOrderStallAttempts;
+        statistics::Scalar ameControlSafetyStallAttempts;
         // Also include number of instructions rescheduled and replayed.
 
         /** Distribution of number of instructions in the queue.

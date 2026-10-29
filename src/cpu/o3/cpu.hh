@@ -45,6 +45,7 @@
 #define __CPU_O3_CPU_HH__
 
 #include <list>
+#include <map>
 #include <queue>
 #include <vector>
 
@@ -52,6 +53,8 @@
 #include "base/statistics.hh"
 #include "cpu/activity.hh"
 #include "cpu/base.hh"
+#include "cpu/compute_offload.hh"
+#include "cpu/minor/inst_queue.hh"
 #include "cpu/o3/bac.hh"
 #include "cpu/o3/comm.hh"
 #include "cpu/o3/commit.hh"
@@ -90,7 +93,7 @@ class ThreadContext;
  * within it, as well as all of the time buffers between stages.  The
  * tick() function for the CPU is defined here.
  */
-class CPU : public BaseCPU
+class CPU : public BaseCPU, public ComputeOffloadCPU
 {
   public:
     typedef std::list<DynInstPtr>::iterator ListIt;
@@ -497,7 +500,28 @@ class CPU : public BaseCPU
      */
     ActivityRecorder activityRec;
 
+    /** Architectural command boundary shared by RVV and AME engines. */
+    minor::MinorInstQueue computeInstQueue;
+    std::map<minor::InstQueueKey, DynInstPtr> computeOffloads;
+
   public:
+    minor::MinorInstQueue &getInstQueue() override
+    { return computeInstQueue; }
+
+    bool isComputeOffload(const StaticInstPtr &inst) const
+    { return computeInstQueue.isOffloadable(inst); }
+
+    bool isAmeOffload(const StaticInstPtr &inst) const
+    {
+        return isComputeOffload(inst) && minor::MinorInstQueue::isAME(inst);
+    }
+
+    bool isAmeStructuralReg(const RegId &reg) const;
+    bool hasAmeScalarResult(const DynInstPtr &inst) const;
+    bool dispatchComputeOffload(const DynInstPtr &inst);
+    void completeComputeOffloads();
+    void cancelComputeOffload(const DynInstPtr &inst);
+
     /** Records that there was time buffer activity this cycle. */
     void activityThisCycle() { activityRec.activity(); }
 

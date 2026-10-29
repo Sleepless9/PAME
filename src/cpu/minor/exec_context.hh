@@ -54,7 +54,12 @@
 #include "cpu/minor/pipeline.hh"
 #include "cpu/simple_thread.hh"
 #include "debug/MinorExecute.hh"
+#include "params/BaseMinorCPU.hh"
 #include "mem/request.hh"
+#include "mem/se_translating_port_proxy.hh"
+#include "mem/translating_port_proxy.hh"
+#include "sim/faults.hh"
+#include "sim/full_system.hh"
 
 namespace gem5
 {
@@ -72,6 +77,12 @@ class Execute;
 class ExecContext : public gem5::ExecContext
 {
   public:
+    enum class MemoryMode
+    {
+        Timing,
+        Functional
+    };
+
     MinorCPU &cpu;
 
     /** ThreadState object, provides all the architectural state. */
@@ -83,14 +94,79 @@ class ExecContext : public gem5::ExecContext
     /** Instruction for the benefit of memory operations and for PC */
     MinorDynInstPtr inst;
 
+  private:
+    const MemoryMode memoryMode;
+
+    Fault
+    functionalMemoryAccess(Addr addr, uint8_t *data, unsigned int size,
+                           Request::Flags flags,
+                           const std::vector<bool> &byte_enable,
+                           bool write)
+    {
+        assert(byte_enable.size() == size);
+
+        auto access = [&](PortProxy &proxy) -> Fault {
+            unsigned int offset = 0;
+            while (offset < size) {
+                while (offset < size && !byte_enable[offset])
+                    ++offset;
+                const unsigned int begin = offset;
+                while (offset < size && byte_enable[offset])
+                    ++offset;
+                if (begin == offset)
+                    continue;
+
+                // The bare-metal SoC's architectural payload must obey the
+                // same local-only range as its accelerator timing ports.
+                const auto &minor_params =
+                    static_cast<const BaseMinorCPUParams &>(cpu.params());
+                const Addr local_base = minor_params.executeOffloadLocalMemoryBase;
+                const Addr local_size = minor_params.executeOffloadLocalMemorySize;
+                if (inst->inInstQueue && local_size) {
+                    const Addr address = addr + begin;
+                    const unsigned bytes = offset - begin;
+                    panic_if(address < addr || address < local_base ||
+                             bytes > local_size ||
+                             address - local_base > local_size - bytes,
+                             "Offload architectural access outside local SPM: "
+                             "addr=%#x bytes=%u pc=%#x", address, bytes,
+                             inst->pc->instAddr());
+                }
+
+                const bool success = write ?
+                    proxy.tryWriteBlob(addr + begin, data + begin,
+                                       offset - begin) :
+                    proxy.tryReadBlob(addr + begin, data + begin,
+                                      offset - begin);
+                if (!success)
+                    return std::make_shared<GenericPageTableFault>(
+                        addr + begin);
+            }
+            return NoFault;
+        };
+
+        if (FullSystem) {
+            TranslatingPortProxy proxy(thread.getTC(), flags);
+            return access(proxy);
+        }
+
+        SETranslatingPortProxy proxy(
+            thread.getTC(), SETranslatingPortProxy::Never, flags);
+        return access(proxy);
+    }
+
+  public:
+
     ExecContext (
         MinorCPU &cpu_,
         SimpleThread &thread_, Execute &execute_,
-        MinorDynInstPtr inst_) :
+        MinorDynInstPtr inst_,
+        MemoryMode memory_mode = MemoryMode::Timing) :
         cpu(cpu_),
         thread(thread_),
         execute(execute_),
-        inst(inst_)
+        inst(inst_),
+        memoryMode(memory_mode)
     {
         DPRINTF(MinorExecute, "ExecContext setting PC: %s\n", *inst->pc);
         pcState(*inst->pc);
@@ -105,10 +181,23 @@ class ExecContext : public gem5::ExecContext
     }
 
     Fault
+    readMem(Addr addr, uint8_t *data, unsigned int size,
+            Request::Flags flags,
+            const std::vector<bool>& byte_enable) override
+    {
+        panic_if(memoryMode != MemoryMode::Functional,
+                 "Minor timing ExecContext cannot perform atomic reads");
+        return functionalMemoryAccess(
+            addr, data, size, flags, byte_enable, false);
+    }
+
+    Fault
     initiateMemRead(Addr addr, unsigned int size,
                     Request::Flags flags,
                     const std::vector<bool>& byte_enable) override
     {
+        panic_if(memoryMode != MemoryMode::Timing,
+                 "Minor functional ExecContext cannot issue timing reads");
         assert(byte_enable.size() == size);
         return execute.getLSQ().pushRequest(inst, true /* load */, nullptr,
             size, addr, flags, nullptr, nullptr, byte_enable);
@@ -129,6 +218,13 @@ class ExecContext : public gem5::ExecContext
         override
     {
         assert(byte_enable.size() == size);
+        if (memoryMode == MemoryMode::Functional) {
+            panic_if(!data || res,
+                     "Accelerator functional commit only supports plain "
+                     "stores");
+            return functionalMemoryAccess(
+                addr, data, size, flags, byte_enable, true);
+        }
         return execute.getLSQ().pushRequest(inst, false /* store */, data,
             size, addr, flags, res, nullptr, byte_enable);
     }

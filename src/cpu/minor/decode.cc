@@ -40,6 +40,7 @@
 #include "arch/generic/decoder.hh"
 #include "base/logging.hh"
 #include "base/trace.hh"
+#include "cpu/minor/inst_queue.hh"
 #include "cpu/minor/pipeline.hh"
 #include "debug/Decode.hh"
 
@@ -62,6 +63,8 @@ Decode::Decode(const std::string &name,
     nextStageReserve(next_stage_input_buffer),
     outputWidth(params.executeInputWidth),
     processMoreThanOneInput(params.decodeCycleInput),
+    offloadRVV(params.executeOffloadRVV),
+    offloadAME(params.executeOffloadAME),
     decodeInfo(params.numThreads),
     threadPriority(0)
 {
@@ -173,7 +176,9 @@ Decode::evaluate()
 
                     decode_info.inputIndex++;
                     decode_info.inMacroop = false;
-                } else if (static_inst->isMacroop()) {
+                } else if (static_inst->isMacroop() &&
+                    !MinorInstQueue::isOffloadCandidate(
+                        static_inst, offloadRVV, offloadAME)) {
                     /* Generate a new micro-op */
                     StaticInstPtr static_micro_inst;
 

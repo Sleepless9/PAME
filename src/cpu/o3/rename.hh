@@ -528,6 +528,8 @@ class Rename
         statistics::Scalar undoneMaps;
         /** Number of serialize instructions handled. */
         statistics::Scalar serializing;
+        /** Compute commands whose static serialize flag was queue-ordered. */
+        statistics::Scalar computeQueueRelaxedSerializing;
         /** Number of instructions marked as temporarily serializing. */
         statistics::Scalar tempSerializing;
         /** Number of instructions inserted into skid buffers. */

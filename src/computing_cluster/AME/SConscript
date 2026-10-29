@@ -1,0 +1,49 @@
+# -*- mode:python -*-
+
+Import('*')
+
+if not env['CONF']['USE_RISCV_ISA']:
+    Return()
+
+ame_sources = [
+    'accumulator.cc',
+    'ame_context.cc',
+    'ame_dispatcher.cc',
+    'ame_scoreboard.cc',
+    'ame_types.cc',
+    'auxiliary_units.cc',
+    'completion_tracker.cc',
+    'global_sequencer.cc',
+    'matrix_lsu.cc',
+    'operand_subsystem.cc',
+    'p1_pipeline.cc',
+    'register_file.cc',
+    'systolic_array.cc',
+]
+
+GTest(
+    'ame_backend.test',
+    'ame_backend.test.cc',
+    *ame_sources,
+    '../../cpu/minor/inst_queue.cc',
+    '../../cpu/reg_class.cc',
+    '../../sim/bufval.cc',
+    with_tag('gem5 simobject'),
+    tags=['riscv isa'],
+)
+
+SimObject('AMEEngine.py', sim_objects=['AMEEngine'], tags=['riscv isa'])
+
+for source in ame_sources:
+    Source(source, tags=['riscv isa'])
+Source('engine.cc', tags=['riscv isa'])
+
+DebugFlag('AMEFlow', 'AME instruction, resource, and supply timing events')
+DebugFlag('AMEPE', 'Per-PE MAC issue and result events')
+CompoundFlag('AMEEngine', ['AMEFlow', 'AMEPE'])
+CompoundFlag('QwenAMETrace', [
+    'MinorInstQueue', 'PseudoInst'
+])
+CompoundFlag('QwenAMEDetail', [
+    'QwenAMETrace', 'AMEEngine'
+])

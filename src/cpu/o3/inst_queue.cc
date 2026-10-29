@@ -325,6 +325,12 @@ InstructionQueue::IQStats::IQStats(CPU *cpu, const unsigned &total_width)
                "removed from graph"),
       ADD_STAT(squashedNonSpecRemoved, statistics::units::Count::get(),
                "Number of squashed non-spec instructions that were removed"),
+      ADD_STAT(ameCommandOrderStallAttempts,
+               statistics::units::Count::get(),
+               "Ready AME issue attempts held for an older AME command"),
+      ADD_STAT(ameControlSafetyStallAttempts,
+               statistics::units::Count::get(),
+               "Ready AME issue attempts held for unresolved control flow"),
       ADD_STAT(numIssuedDist, statistics::units::Count::get(),
                "Number of insts issued each cycle"),
       ADD_STAT(statFuBusy, statistics::units::Count::get(),
@@ -775,7 +781,8 @@ InstructionQueue::insert(const DynInstPtr &new_inst)
     // register(s).
     addToProducers(new_inst);
 
-    if (new_inst->isMemRef()) {
+    if (new_inst->isMemRef() &&
+        !cpu->isComputeOffload(new_inst->staticInst)) {
         memDepUnit[new_inst->threadNumber].insert(new_inst);
     } else {
         addIfReady(new_inst);
@@ -817,7 +824,8 @@ InstructionQueue::insertNonSpec(const DynInstPtr &new_inst)
 
     // If it's a memory instruction, add it to the memory dependency
     // unit.
-    if (new_inst->isMemRef()) {
+    if (new_inst->isMemRef() &&
+        !cpu->isComputeOffload(new_inst->staticInst)) {
         memDepUnit[new_inst->threadNumber].insertNonSpec(new_inst);
     }
 
@@ -962,6 +970,19 @@ InstructionQueue::scheduleReadyInsts()
 
         DynInstPtr issuing_inst = readyInsts[op_class].top();
 
+        if (cpu->isAmeOffload(issuing_inst->staticInst)) {
+            if (hasOlderUnresolvedControl(issuing_inst)) {
+                ++iqStats.ameControlSafetyStallAttempts;
+                ++order_it;
+                continue;
+            }
+            if (hasOlderUnissuedAme(issuing_inst)) {
+                ++iqStats.ameCommandOrderStallAttempts;
+                ++order_it;
+                continue;
+            }
+        }
+
         if (issuing_inst->isFloating()) {
             iqIOStats.fpInstQueueReads++;
         } else if (issuing_inst->isVector()) {
@@ -1076,10 +1097,13 @@ InstructionQueue::scheduleReadyInsts()
             if (issuing_inst->firstIssue == -1)
                 issuing_inst->firstIssue = curTick();
 
-            if (!issuing_inst->isMemRef()) {
+            const bool external_lsu =
+                cpu->isComputeOffload(issuing_inst->staticInst);
+            if (!issuing_inst->isMemRef() || external_lsu) {
                 // Memory instructions can not be freed from the IQ until they
                 // complete.
-                issuing_inst->clearInIQ();
+                if (!issuing_inst->isMemRef())
+                    issuing_inst->clearInIQ();
             } else {
                 memDepUnit[tid].issue(issuing_inst);
             }
@@ -1124,7 +1148,11 @@ InstructionQueue::scheduleNonSpec(const InstSeqNum &inst)
 
     (*inst_it).second->setCanIssue();
 
-    if (!(*inst_it).second->isMemRef()) {
+    if (cpu->isComputeOffload((*inst_it).second->staticInst) &&
+        (*inst_it).second->isMemRef()) {
+        if ((*inst_it).second->readyToIssue())
+            addReadyMemInst((*inst_it).second);
+    } else if (!(*inst_it).second->isMemRef()) {
         addIfReady((*inst_it).second);
     } else {
         memDepUnit[tid].nonSpecInstReady((*inst_it).second);
@@ -1175,7 +1203,8 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
     // instruction at this point since we know it executed without issues.
     ThreadID tid = completed_inst->threadNumber;
     if (completed_inst->isMemRef()) {
-        memDepUnit[tid].completeInst(completed_inst);
+        if (!cpu->isComputeOffload(completed_inst->staticInst))
+            memDepUnit[tid].completeInst(completed_inst);
 
         DPRINTF(IQ, "Completing mem instruction PC: %s [sn:%llu]\n",
             completed_inst->pcState(), completed_inst->seqNum);
@@ -1194,6 +1223,12 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
     {
         PhysRegIdPtr dest_reg =
             completed_inst->renamedDestIdx(dest_reg_idx);
+
+        if (cpu->isAmeOffload(completed_inst->staticInst) &&
+            cpu->isAmeStructuralReg(
+                completed_inst->destRegIdx(dest_reg_idx))) {
+            continue;
+        }
 
         // Special case of uniq or control registers.  They are not
         // handled by the IQ and thus have no dependency graph entry.
@@ -1429,10 +1464,15 @@ InstructionQueue::doSquash(ThreadID tid)
                          (squashed_inst->isLoad() ||
                           (squashed_inst->isStore() &&
                              !squashed_inst->isStoreConditional()));
+            const bool external_non_spec =
+                squashed_inst->isMemRef() &&
+                cpu->isComputeOffload(squashed_inst->staticInst) &&
+                squashed_inst->isNonSpeculative();
 
             // Remove the instruction from the dependency list.
             if (is_acq_rel ||
-                (!squashed_inst->isNonSpeculative() &&
+                (!external_non_spec &&
+                 !squashed_inst->isNonSpeculative() &&
                  !squashed_inst->isStoreConditional() &&
                  !squashed_inst->isAtomic() &&
                  !squashed_inst->isReadBarrier() &&
@@ -1512,6 +1552,11 @@ InstructionQueue::doSquash(ThreadID tid)
         {
             PhysRegIdPtr dest_reg =
                 squashed_inst->renamedDestIdx(dest_reg_idx);
+            if (cpu->isAmeOffload(squashed_inst->staticInst) &&
+                cpu->isAmeStructuralReg(
+                    squashed_inst->destRegIdx(dest_reg_idx))) {
+                continue;
+            }
             if (dest_reg->isAlwaysReady()) {
                 continue;
             }
@@ -1592,6 +1637,11 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
     {
         PhysRegIdPtr dest_reg = new_inst->renamedDestIdx(dest_reg_idx);
 
+        if (cpu->isAmeOffload(new_inst->staticInst) &&
+            cpu->isAmeStructuralReg(new_inst->destRegIdx(dest_reg_idx))) {
+            continue;
+        }
+
         // Some registers have fixed mapping, and there is no need to track
         // dependencies as these instructions must be executed at commit.
         if (dest_reg->isAlwaysReady()) {
@@ -1612,6 +1662,34 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
     }
 }
 
+bool
+InstructionQueue::hasOlderUnissuedAme(const DynInstPtr &inst) const
+{
+    for (const auto &older : instList[inst->threadNumber]) {
+        if (older->seqNum >= inst->seqNum)
+            break;
+        if (!older->isSquashed() && cpu->isAmeOffload(older->staticInst) &&
+            !older->isIssued()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+InstructionQueue::hasOlderUnresolvedControl(const DynInstPtr &inst) const
+{
+    for (const auto &older : instList[inst->threadNumber]) {
+        if (older->seqNum >= inst->seqNum)
+            break;
+        if (!older->isSquashed() && older->isControl() &&
+            !older->isExecuted()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void
 InstructionQueue::addIfReady(const DynInstPtr &inst)
 {
@@ -1620,7 +1698,8 @@ InstructionQueue::addIfReady(const DynInstPtr &inst)
     if (inst->readyToIssue()) {
 
         //Add the instruction to the proper ready list.
-        if (inst->isMemRef()) {
+        if (inst->isMemRef() &&
+            !cpu->isComputeOffload(inst->staticInst)) {
 
             DPRINTF(IQ, "Checking if memory instruction can issue.\n");
 

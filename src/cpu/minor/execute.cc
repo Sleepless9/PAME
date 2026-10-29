@@ -43,6 +43,7 @@
 #include "cpu/minor/exec_context.hh"
 #include "cpu/minor/fetch1.hh"
 #include "cpu/minor/lsq.hh"
+#include "cpu/minor/pipeline.hh"
 #include "cpu/op_class.hh"
 #include "debug/Activity.hh"
 #include "debug/Branch.hh"
@@ -50,6 +51,7 @@
 #include "debug/ExecFaulting.hh"
 #include "debug/MinorExecute.hh"
 #include "debug/MinorInterrupt.hh"
+#include "debug/MinorInstQueue.hh"
 #include "debug/MinorMem.hh"
 #include "debug/MinorTrace.hh"
 #include "debug/PCEvent.hh"
@@ -78,7 +80,14 @@ Execute::Execute(const std::string &name_, MinorCPU &cpu_,
       setTraceTimeOnCommit(params.executeSetTraceTimeOnCommit),
       setTraceTimeOnIssue(params.executeSetTraceTimeOnIssue),
       allowEarlyMemIssue(params.executeAllowEarlyMemoryIssue),
+      rvvFunctionalMemory(params.executeOffloadRVVFunctionalMemory),
       noCostFUIndex(fuDescriptions.funcUnits.size() + 1),
+      instQueueFUIndex(fuDescriptions.funcUnits.size() + 2),
+      instQueue(name_ + ".instQueue", params.executeInstQueueSize,
+          params.executeOffloadRVV, params.executeOffloadAME,
+          [this]() {
+              cpu.wakeupOnEvent(Pipeline::ExecuteStageId);
+          }),
       lsq(name_ + ".lsq", name_ + ".dcache_port", cpu_, *this,
           params.executeMaxAccessesInMemory, params.executeMemoryWidth,
           params.executeLSQRequestsQueueSize,
@@ -126,7 +135,9 @@ Execute::Execute(const std::string &name_, MinorCPU &cpu_,
     /* This should be large enough to count all the in-FU instructions
      *  which need to be accounted for in the inFlightInsts
      *  queue */
-    unsigned int total_slots = 0;
+    unsigned int total_slots =
+        (params.executeOffloadRVV || params.executeOffloadAME) ?
+        params.executeInstQueueSize : 0;
 
     /* Make FUPipelines for each MinorFU */
     for (unsigned int i = 0; i < numFuncUnits; i++) {
@@ -539,6 +550,197 @@ cyclicIndexDec(unsigned int index, unsigned int cycle_size)
     return ret;
 }
 
+bool
+Execute::issueInstQueue(MinorDynInstPtr inst)
+{
+    const ThreadID tid = inst->id.threadId;
+    ThreadContext *tc = cpu.getContext(tid);
+
+    // Dynamic AME register spans and RVV configuration are sampled at dispatch.
+    // A SerializeBefore offload must see all older architectural effects.
+    if (inst->staticInst->isSerializeBefore() &&
+        (!executeInfo[tid].inFlightInsts->empty() || !lsq.isDrained())) {
+        ++issueStats.offloadSerializeBeforeStalls;
+        return false;
+    }
+
+    if (!instQueue.canDispatch()) {
+        ++issueStats.offloadQueueFullStalls;
+        DPRINTF(MinorInstQueue, "Queue full, stalling inst: %s\n", *inst);
+        return false;
+    }
+
+    if (!scoreboard[tid].canInstIssue(
+            inst, nullptr, nullptr, cpu.curCycle(), tc,
+            instQueue.isRVV(inst->staticInst), true)) {
+        ++issueStats.offloadSourceStalls;
+        DPRINTF(MinorInstQueue,
+                "Source dependency stalls offload inst: %s\n", *inst);
+        return false;
+    }
+
+    inst->fuIndex = instQueueFUIndex;
+    inst->inInstQueue = true;
+    inst->extraCommitDelay = Cycles(0);
+    inst->extraCommitDelayExpr = nullptr;
+
+    InstQueuePacket packet = instQueue.makePacket(
+        inst->staticInst, tc, tid, inst->id.execSeqNum,
+        inst->pc->instAddr());
+    if (!instQueue.dispatch(std::move(packet))) {
+        inst->inInstQueue = false;
+        return false;
+    }
+    if (inst->staticInst->isSerializeAfter() ||
+        inst->staticInst->isSquashAfter())
+        executeInfo[tid].serialOffload = inst->id.execSeqNum;
+
+    /* The response time is component-controlled, so every destination is
+     * unpredictable until the matching completion reaches commit. */
+    scoreboard[tid].markupInstDests(
+        inst, cpu.curCycle(), tc, true);
+
+    QueuedInst queued(inst);
+    executeInfo[tid].inFlightInsts->push(queued);
+
+    const auto op_class = inst->staticInst->opClass();
+    issueStats.issuedInstType[tid][op_class]++;
+    if (inst->staticInst->isVector())
+        cpu.executeStats[tid]->numVecAluAccesses++;
+
+    cpu.activityRecorder->activity();
+    return true;
+}
+
+bool
+Execute::commitInstQueue(MinorDynInstPtr inst, BranchData &branch,
+    Fault &fault, bool &committed, bool &completed_mem_issue)
+{
+    const InstQueueKey key = instQueueKey(inst);
+    if (!instQueue.hasPacket(key)) {
+        /* The host flushed this packet.  Retire the Minor in-flight entry as
+         * a discard without asking the accelerator to execute it. */
+        fault = NoFault;
+        committed = false;
+        completed_mem_issue = false;
+        return true;
+    }
+    if (!instQueue.hasCompletion(key)) {
+        ++issueStats.offloadCompletionWaits;
+        return false;
+    }
+
+    const InstQueueCompletion &completion = instQueue.getCompletion(key);
+    ThreadContext *thread = cpu.getContext(inst->id.threadId);
+    fault = completion.fault;
+    const bool functional_memory = inst->staticInst->isMemRef() &&
+        (instQueue.isAME(inst->staticInst) ||
+         (rvvFunctionalMemory && instQueue.isRVV(inst->staticInst)));
+
+    /* A committed scalar store may still reside in Minor's store buffer.
+     * Functional accelerator memory semantics bypass that buffer, so wait
+     * until all older Minor memory work is globally visible. */
+    if (fault == NoFault && functional_memory && !lsq.isDrained()) {
+        return false;
+    }
+
+    if (fault == NoFault && inst->staticInst->isMemRef() &&
+        !functional_memory) {
+        if (!lsq.canRequest())
+            return false;
+
+        /* The accelerator has finished its timing work.  Architectural
+         * memory semantics remain in the ISA/Minor LSQ path. */
+        inst->instQueueMemPending = true;
+
+        bool predicate_passed = false;
+        completed_mem_issue = executeMemRefInst(
+            inst, branch, predicate_passed, fault);
+
+        /* Keep the queue ownership marker while LSQ backpressure stalls the
+         * transfer.  Once accepted, inLSQ becomes the host-side owner. */
+        if (completed_mem_issue) {
+            inst->inInstQueue = false;
+            if (inst->inLSQ)
+                instQueue.markMemoryIssued(key);
+        }
+
+        if (completed_mem_issue && fault != NoFault) {
+            DPRINTF(MinorInstQueue,
+                    "Fault after queue timing completion: %s\n",
+                    fault->name());
+            fault->invoke(thread, nullptr);
+            tryToBranch(inst, fault, branch);
+            instQueue.retire(key);
+            inst->instQueueMemPending = false;
+        }
+        return completed_mem_issue;
+    }
+
+    if (fault == NoFault &&
+        (inst->staticInst->isVector() ||
+         instQueue.isAME(inst->staticInst))) {
+        ExecContext context(cpu, *cpu.threads[inst->id.threadId],
+                            *this, inst,
+                            functional_memory ?
+                                ExecContext::MemoryMode::Functional :
+                                ExecContext::MemoryMode::Timing);
+        fault = inst->staticInst->execute(&context, inst->traceData);
+        if (inst->traceData)
+            inst->traceData->setPredicate(context.readPredicate());
+        committed = true;
+    } else if (fault == NoFault) {
+        for (const auto &result : completion.scalarResults) {
+            if (result.destOperandIndex >= inst->staticInst->numDestRegs()) {
+                panic("%s: completion for tid=%d exec=%llu names invalid "
+                      "destination operand %u", name(), inst->id.threadId,
+                      inst->id.execSeqNum, result.destOperandIndex);
+            }
+
+            const RegId &reg =
+                inst->staticInst->destRegIdx(result.destOperandIndex);
+            if (reg.is(InvalidRegClass))
+                continue;
+            if (!reg.is(IntRegClass)) {
+                panic("%s: completion for tid=%d exec=%llu attempted "
+                      "non-scalar writeback to %s", name(),
+                      inst->id.threadId, inst->id.execSeqNum,
+                      reg.className());
+            }
+
+            thread->setReg(reg, result.value);
+            cpu.executeStats[inst->id.threadId]->numIntRegWrites++;
+            DPRINTF(MinorInstQueue,
+                    "Scalar writeback tid=%d exec=%llu operand=%u "
+                    "reg=%s value=%#x\n", inst->id.threadId,
+                    inst->id.execSeqNum, result.destOperandIndex,
+                    reg.className(), result.value);
+        }
+        committed = true;
+    }
+
+    if (fault != NoFault) {
+        if (inst->traceData) {
+            if (debug::ExecFaulting) {
+                inst->traceData->setFaulting(true);
+            } else {
+                delete inst->traceData;
+                inst->traceData = nullptr;
+            }
+        }
+        fault->invoke(thread, inst->staticInst);
+        committed = true;
+    }
+
+    if (inst->traceData && !inst->staticInst->isVector() &&
+        !instQueue.isAME(inst->staticInst))
+        inst->traceData->setPredicate(true);
+
+    tryToBranch(inst, fault, branch);
+    instQueue.retire(key);
+    return true;
+}
+
 unsigned int
 Execute::issue(ThreadID thread_id)
 {
@@ -595,171 +797,35 @@ Execute::issue(ThreadID thread_id)
             /* Try FU from 0 each instruction */
             fu_index = 0;
 
-            /* Try and issue a single instruction stepping through the
-             *  available FUs */
-            do {
-                FUPipeline *fu = funcUnits[fu_index];
+            const InstQueueKey serial_key{thread_id, thread.serialOffload};
+            if (thread.serialOffload && !instQueue.hasPacket(serial_key))
+                thread.serialOffload = 0;
+            if (thread.serialOffload) {
+                // Do not issue work that this serializing offload must flush.
+                ++issueStats.offloadSerializeAfterStalls;
+                issued = false;
+            } else if (instQueue.isOffloadable(inst->staticInst)) {
+                issued = issueInstQueue(inst);
+            } else {
+                /* Try and issue a single instruction stepping through the
+                 *  available FUs */
+                do {
+                    FUPipeline *fu = funcUnits[fu_index];
 
-                DPRINTF(MinorExecute, "Trying to issue inst: %s to FU: %d\n",
-                    *inst, fu_index);
-
-                /* Does the examined fu have the OpClass-related capability
-                 *  needed to execute this instruction?  Faults can always
-                 *  issue to any FU but probably should just 'live' in the
-                 *  inFlightInsts queue rather than having an FU. */
-                bool fu_is_capable = (!inst->isFault() ?
-                    fu->provides(inst->staticInst->opClass()) : true);
-
-                if (inst->isNoCostInst()) {
-                    /* Issue free insts. to a fake numbered FU */
-                    fu_index = noCostFUIndex;
-
-                    /* And start the countdown on activity to allow
-                     *  this instruction to get to the end of its FU */
-                    cpu.activityRecorder->activity();
-
-                    /* Mark the destinations for this instruction as
-                     *  busy */
-                    scoreboard[thread_id].markupInstDests(inst, cpu.curCycle() +
-                        Cycles(0), cpu.getContext(thread_id), false);
-
-                    DPRINTF(MinorExecute, "Issuing %s to %d\n", inst->id, noCostFUIndex);
-                    inst->fuIndex = noCostFUIndex;
-                    inst->extraCommitDelay = Cycles(0);
-                    inst->extraCommitDelayExpr = NULL;
-
-                    /* Push the instruction onto the inFlight queue so
-                     *  it can be committed in order */
-                    QueuedInst fu_inst(inst);
-                    thread.inFlightInsts->push(fu_inst);
-
-                    issued = true;
-
-                } else if (!fu_is_capable || fu->alreadyPushed()) {
-                    /* Skip */
-                    if (!fu_is_capable) {
-                        DPRINTF(MinorExecute, "Can't issue as FU: %d isn't"
-                            " capable\n", fu_index);
-                    } else {
-                        DPRINTF(MinorExecute, "Can't issue as FU: %d is"
-                            " already busy\n", fu_index);
-                    }
-                } else if (fu->stalled) {
-                    DPRINTF(MinorExecute, "Can't issue inst: %s into FU: %d,"
-                        " it's stalled\n",
+                    DPRINTF(MinorExecute, "Trying to issue inst: %s to FU: %d\n",
                         *inst, fu_index);
-                } else if (!fu->canInsert()) {
-                    DPRINTF(MinorExecute, "Can't issue inst: %s to busy FU"
-                        " for another: %d cycles\n",
-                        *inst, fu->cyclesBeforeInsert());
-                } else {
-                    MinorFUTiming *timing = (!inst->isFault() ?
-                        fu->findTiming(inst->staticInst) : NULL);
 
-                    const std::vector<Cycles> *src_latencies =
-                        (timing ? &(timing->srcRegsRelativeLats)
-                            : NULL);
+                    /* Does the examined fu have the OpClass-related capability
+                     *  needed to execute this instruction?  Faults can always
+                     *  issue to any FU but probably should just 'live' in the
+                     *  inFlightInsts queue rather than having an FU. */
+                    bool fu_is_capable = (!inst->isFault() ?
+                        fu->provides(inst->staticInst->opClass()) : true);
 
-                    const std::vector<bool> *cant_forward_from_fu_indices =
-                        &(fu->cantForwardFromFUIndices);
+                    if (inst->isNoCostInst()) {
+                        /* Issue free insts. to a fake numbered FU */
+                        fu_index = noCostFUIndex;
 
-                    if (timing && timing->suppress) {
-                        DPRINTF(MinorExecute, "Can't issue inst: %s as extra"
-                            " decoding is suppressing it\n",
-                            *inst);
-                    } else if (!scoreboard[thread_id].canInstIssue(inst,
-                        src_latencies, cant_forward_from_fu_indices,
-                        cpu.curCycle(), cpu.getContext(thread_id)))
-                    {
-                        DPRINTF(MinorExecute, "Can't issue inst: %s yet\n",
-                            *inst);
-                    } else {
-                        /* Can insert the instruction into this FU */
-                        DPRINTF(MinorExecute, "Issuing inst: %s"
-                            " into FU %d\n", *inst,
-                            fu_index);
-                        // Update ALU access stats.
-                        if (!inst->isFault()) {
-                            auto tid = thread_id;
-                            if (inst->staticInst->isInteger()) {
-                                cpu.executeStats[tid]->numIntAluAccesses++;
-                            }
-                            if (inst->staticInst->isFloating()) {
-                                cpu.executeStats[tid]->numFpAluAccesses++;
-                            }
-                            if (inst->staticInst->isVector()) {
-                                cpu.executeStats[tid]->numVecAluAccesses++;
-                            }
-                        }
-                        Cycles extra_dest_retire_lat = Cycles(0);
-                        TimingExpr *extra_dest_retire_lat_expr = NULL;
-                        Cycles extra_assumed_lat = Cycles(0);
-
-                        /* Add the extraCommitDelay and extraAssumeLat to
-                         *  the FU pipeline timings */
-                        if (timing) {
-                            extra_dest_retire_lat =
-                                timing->extraCommitLat;
-                            extra_dest_retire_lat_expr =
-                                timing->extraCommitLatExpr;
-                            extra_assumed_lat =
-                                timing->extraAssumedLat;
-                        }
-
-                        issued_mem_ref = inst->isMemRef();
-
-                        QueuedInst fu_inst(inst);
-
-                        /* Decorate the inst with FU details */
-                        inst->fuIndex = fu_index;
-                        inst->extraCommitDelay = extra_dest_retire_lat;
-                        inst->extraCommitDelayExpr =
-                            extra_dest_retire_lat_expr;
-
-                        if (issued_mem_ref) {
-                            /* Remember which instruction this memory op
-                             *  depends on so that initiateAcc can be called
-                             *  early */
-                            if (allowEarlyMemIssue) {
-                                inst->instToWaitFor =
-                                    scoreboard[thread_id].execSeqNumToWaitFor(inst,
-                                        cpu.getContext(thread_id));
-
-                                if (lsq.getLastMemBarrier(thread_id) >
-                                    inst->instToWaitFor)
-                                {
-                                    DPRINTF(MinorExecute, "A barrier will"
-                                        " cause a delay in mem ref issue of"
-                                        " inst: %s until after inst"
-                                        " %d(exec)\n", *inst,
-                                        lsq.getLastMemBarrier(thread_id));
-
-                                    inst->instToWaitFor =
-                                        lsq.getLastMemBarrier(thread_id);
-                                } else {
-                                    DPRINTF(MinorExecute, "Memory ref inst:"
-                                        " %s must wait for inst %d(exec)"
-                                        " before issuing\n",
-                                        *inst, inst->instToWaitFor);
-                                }
-
-                                inst->canEarlyIssue = true;
-                            }
-                            /* Also queue this instruction in the memory ref
-                             *  queue to ensure in-order issue to the LSQ */
-                            DPRINTF(MinorExecute, "Pushing mem inst: %s\n",
-                                *inst);
-                            thread.inFUMemInsts->push(fu_inst);
-                        }
-
-                        /* Update the # of insts. issued per OpClass type */
-                        if (!inst->isFault()) {
-                            auto opclass = inst->staticInst->opClass();
-                            issueStats.issuedInstType[thread_id][opclass]++;
-                        }
-
-                        /* Issue to FU */
-                        fu->push(fu_inst);
                         /* And start the countdown on activity to allow
                          *  this instruction to get to the end of its FU */
                         cpu.activityRecorder->activity();
@@ -767,22 +833,169 @@ Execute::issue(ThreadID thread_id)
                         /* Mark the destinations for this instruction as
                          *  busy */
                         scoreboard[thread_id].markupInstDests(inst, cpu.curCycle() +
-                            fu->description.opLat +
-                            extra_dest_retire_lat +
-                            extra_assumed_lat,
-                            cpu.getContext(thread_id),
-                            issued_mem_ref && extra_assumed_lat == Cycles(0));
+                            Cycles(0), cpu.getContext(thread_id), false);
+
+                        DPRINTF(MinorExecute, "Issuing %s to %d\n", inst->id, noCostFUIndex);
+                        inst->fuIndex = noCostFUIndex;
+                        inst->extraCommitDelay = Cycles(0);
+                        inst->extraCommitDelayExpr = NULL;
 
                         /* Push the instruction onto the inFlight queue so
                          *  it can be committed in order */
+                        QueuedInst fu_inst(inst);
                         thread.inFlightInsts->push(fu_inst);
 
                         issued = true;
-                    }
-                }
 
-                fu_index++;
-            } while (fu_index != numFuncUnits && !issued);
+                    } else if (!fu_is_capable || fu->alreadyPushed()) {
+                        /* Skip */
+                        if (!fu_is_capable) {
+                            DPRINTF(MinorExecute, "Can't issue as FU: %d isn't"
+                                " capable\n", fu_index);
+                        } else {
+                            DPRINTF(MinorExecute, "Can't issue as FU: %d is"
+                                " already busy\n", fu_index);
+                        }
+                    } else if (fu->stalled) {
+                        DPRINTF(MinorExecute, "Can't issue inst: %s into FU: %d,"
+                            " it's stalled\n",
+                            *inst, fu_index);
+                    } else if (!fu->canInsert()) {
+                        DPRINTF(MinorExecute, "Can't issue inst: %s to busy FU"
+                            " for another: %d cycles\n",
+                            *inst, fu->cyclesBeforeInsert());
+                    } else {
+                        MinorFUTiming *timing = (!inst->isFault() ?
+                            fu->findTiming(inst->staticInst) : NULL);
+
+                        const std::vector<Cycles> *src_latencies =
+                            (timing ? &(timing->srcRegsRelativeLats)
+                                : NULL);
+
+                        const std::vector<bool> *cant_forward_from_fu_indices =
+                            &(fu->cantForwardFromFUIndices);
+
+                        if (timing && timing->suppress) {
+                            DPRINTF(MinorExecute, "Can't issue inst: %s as extra"
+                                " decoding is suppressing it\n",
+                                *inst);
+                        } else if (!scoreboard[thread_id].canInstIssue(inst,
+                            src_latencies, cant_forward_from_fu_indices,
+                            cpu.curCycle(), cpu.getContext(thread_id)))
+                        {
+                            DPRINTF(MinorExecute, "Can't issue inst: %s yet\n",
+                                *inst);
+                        } else {
+                            /* Can insert the instruction into this FU */
+                            DPRINTF(MinorExecute, "Issuing inst: %s"
+                                " into FU %d\n", *inst,
+                                fu_index);
+                            // Update ALU access stats.
+                            if (!inst->isFault()) {
+                                auto tid = thread_id;
+                                if (inst->staticInst->isInteger()) {
+                                    cpu.executeStats[tid]->numIntAluAccesses++;
+                                }
+                                if (inst->staticInst->isFloating()) {
+                                    cpu.executeStats[tid]->numFpAluAccesses++;
+                                }
+                                if (inst->staticInst->isVector()) {
+                                    cpu.executeStats[tid]->numVecAluAccesses++;
+                                }
+                            }
+                            Cycles extra_dest_retire_lat = Cycles(0);
+                            TimingExpr *extra_dest_retire_lat_expr = NULL;
+                            Cycles extra_assumed_lat = Cycles(0);
+
+                            /* Add the extraCommitDelay and extraAssumeLat to
+                             *  the FU pipeline timings */
+                            if (timing) {
+                                extra_dest_retire_lat =
+                                    timing->extraCommitLat;
+                                extra_dest_retire_lat_expr =
+                                    timing->extraCommitLatExpr;
+                                extra_assumed_lat =
+                                    timing->extraAssumedLat;
+                            }
+
+                            issued_mem_ref = inst->isMemRef();
+
+                            QueuedInst fu_inst(inst);
+
+                            /* Decorate the inst with FU details */
+                            inst->fuIndex = fu_index;
+                            inst->extraCommitDelay = extra_dest_retire_lat;
+                            inst->extraCommitDelayExpr =
+                                extra_dest_retire_lat_expr;
+
+                            if (issued_mem_ref) {
+                                /* Remember which instruction this memory op
+                                 *  depends on so that initiateAcc can be called
+                                 *  early */
+                                if (allowEarlyMemIssue) {
+                                    inst->instToWaitFor =
+                                        scoreboard[thread_id].execSeqNumToWaitFor(inst,
+                                            cpu.getContext(thread_id));
+
+                                    if (lsq.getLastMemBarrier(thread_id) >
+                                        inst->instToWaitFor)
+                                    {
+                                        DPRINTF(MinorExecute, "A barrier will"
+                                            " cause a delay in mem ref issue of"
+                                            " inst: %s until after inst"
+                                            " %d(exec)\n", *inst,
+                                            lsq.getLastMemBarrier(thread_id));
+
+                                        inst->instToWaitFor =
+                                            lsq.getLastMemBarrier(thread_id);
+                                    } else {
+                                        DPRINTF(MinorExecute, "Memory ref inst:"
+                                            " %s must wait for inst %d(exec)"
+                                            " before issuing\n",
+                                            *inst, inst->instToWaitFor);
+                                    }
+
+                                    inst->canEarlyIssue = true;
+                                }
+                                /* Also queue this instruction in the memory ref
+                                 *  queue to ensure in-order issue to the LSQ */
+                                DPRINTF(MinorExecute, "Pushing mem inst: %s\n",
+                                    *inst);
+                                thread.inFUMemInsts->push(fu_inst);
+                            }
+
+                            /* Update the # of insts. issued per OpClass type */
+                            if (!inst->isFault()) {
+                                auto opclass = inst->staticInst->opClass();
+                                issueStats.issuedInstType[thread_id][opclass]++;
+                            }
+
+                            /* Issue to FU */
+                            fu->push(fu_inst);
+                            /* And start the countdown on activity to allow
+                             *  this instruction to get to the end of its FU */
+                            cpu.activityRecorder->activity();
+
+                            /* Mark the destinations for this instruction as
+                             *  busy */
+                            scoreboard[thread_id].markupInstDests(inst, cpu.curCycle() +
+                                fu->description.opLat +
+                                extra_dest_retire_lat +
+                                extra_assumed_lat,
+                                cpu.getContext(thread_id),
+                                issued_mem_ref && extra_assumed_lat == Cycles(0));
+
+                            /* Push the instruction onto the inFlight queue so
+                             *  it can be committed in order */
+                            thread.inFlightInsts->push(fu_inst);
+
+                            issued = true;
+                        }
+                    }
+
+                    fu_index++;
+                } while (fu_index != numFuncUnits && !issued);
+            }
 
             if (!issued)
                 DPRINTF(MinorExecute, "Didn't issue inst: %s\n", *inst);
@@ -979,6 +1192,10 @@ Execute::commitInst(MinorDynInstPtr inst, bool early_memory_issue,
         inst->fault->invoke(thread, NULL);
 
         tryToBranch(inst, fault, branch);
+    } else if (inst->inInstQueue) {
+        DPRINTF(MinorInstQueue, "Committing returned inst: %s\n", *inst);
+        completed_inst = commitInstQueue(
+            inst, branch, fault, committed, completed_mem_issue);
     } else if (inst->staticInst->isMemRef()) {
         /* Memory accesses are executed in two parts:
          *  executeMemRefInst -- calculates the EA and issues the access
@@ -1199,7 +1416,9 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
         {
             /* Try to commit from the memory responses next */
             discard_inst = inst->id.streamSeqNum !=
-                           ex_info.streamSeqNum || discard;
+                           ex_info.streamSeqNum || discard ||
+                (inst->instQueueMemPending &&
+                 !instQueue.hasPacket(instQueueKey(inst)));
 
             DPRINTF(MinorExecute, "Trying to commit mem response: %s\n",
                 *inst);
@@ -1211,9 +1430,18 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
                     *inst, ex_info.streamSeqNum);
 
                 lsq.popResponse(mem_response);
+                if (inst->instQueueMemPending) {
+                    instQueue.cancel(instQueueKey(inst));
+                    inst->instQueueMemPending = false;
+                }
             } else {
                 handleMemResponse(inst, mem_response, branch, fault);
                 committed_inst = true;
+                if (inst->instQueueMemPending) {
+                    if (instQueue.hasCompletion(instQueueKey(inst)))
+                        instQueue.retire(instQueueKey(inst));
+                    inst->instQueueMemPending = false;
+                }
             }
 
             completed_mem_ref = true;
@@ -1248,6 +1476,8 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
                     !fu_inst->inLSQ &&
                     fu_inst->canEarlyIssue &&
                     ex_info.streamSeqNum == fu_inst->id.streamSeqNum &&
+                    !instQueue.hasOlderUnissuedMemory(
+                        thread_id, fu_inst->id.execSeqNum) &&
                     head_exec_seq_num > fu_inst->instToWaitFor)
                 {
                     DPRINTF(MinorExecute, "Issuing mem ref early"
@@ -1269,9 +1499,25 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
                 completed_inst = true;
             }
 
+            /* External execution can finish out of order, but only the
+             * program-order head is allowed to consume its completion. A
+             * squashed request does not wait for a response. */
+            if (!completed_inst && inst->inInstQueue &&
+                (instQueue.hasCompletion(instQueueKey(inst)) ||
+                 !instQueue.hasPacket(instQueueKey(inst)) ||
+                 inst->id.streamSeqNum != ex_info.streamSeqNum || discard))
+            {
+                DPRINTF(MinorInstQueue,
+                        "Trying to commit queue inst: %s complete=%d\n",
+                        *inst,
+                        instQueue.hasCompletion(instQueueKey(inst)));
+                try_to_commit = true;
+                completed_inst = true;
+            }
+
             /* Try to issue from the ends of FUs and the inFlightInsts
              *  queue */
-            if (!completed_inst && !inst->inLSQ) {
+            if (!completed_inst && !inst->inLSQ && !inst->inInstQueue) {
                 DPRINTF(MinorExecute, "Trying to commit from FUs\n");
 
                 /* Try to commit from a functional unit */
@@ -1374,7 +1620,8 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
                      *  instruction wasn't the inFlightInsts head
                      *  but had already been committed, it would have
                      *  unstalled the pipeline before here */
-                    if (inst->fuIndex != noCostFUIndex) {
+                    if (inst->fuIndex < numFuncUnits &&
+                        !inst->inInstQueue) {
                         DPRINTF(MinorExecute, "Unstalling %d for inst %s\n", inst->fuIndex, inst->id);
                         funcUnits[inst->fuIndex]->stalled = false;
                     }
@@ -1434,6 +1681,10 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
              *  clear its dependencies */
             ex_info.inFlightInsts->pop();
 
+            if ((inst->inInstQueue || inst->instQueueMemPending) &&
+                discard_inst)
+                instQueue.cancel(instQueueKey(inst));
+
             /* Complete barriers in the LSQ/move to store buffer */
             if (inst->isInst() && inst->staticInst->isFullMemBarrier()) {
                 DPRINTF(MinorMem, "Completing memory barrier"
@@ -1441,7 +1692,8 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
                 lsq.completeMemBarrierInst(inst, committed_inst);
             }
 
-            scoreboard[thread_id].clearInstDests(inst, inst->isMemRef());
+            scoreboard[thread_id].clearInstDests(
+                inst, inst->isMemRef() || inst->inInstQueue);
         }
 
         /* Handle per-cycle instruction counting */
@@ -1505,6 +1757,12 @@ Execute::evaluate()
     bool interrupted = false;
     ThreadID interrupt_tid = checkInterrupts(branch, interrupted);
 
+    /* A stream change is owned by MinorCPU.  The accelerator has no stream
+     * state of its own, so an interrupt/branch already present on the host
+     * boundary must invalidate all packets that are still in RVV timing. */
+    if (branch.isStreamChange())
+        instQueue.cancelAll();
+
     if (interrupt_tid != InvalidThreadID) {
         /* Signalling an interrupt this cycle, not issuing/committing from
          * any other threads */
@@ -1560,6 +1818,13 @@ Execute::evaluate()
                 setDrainState(commit_tid, DrainAllInsts);
             }
         }
+
+        /* commitInst() can generate a real branch (including vset*'s PC
+         * configuration update).  Cancel younger RVV work in the same host
+         * cycle so no stale lane completion can survive the flush. */
+        if (branch.isStreamChange())
+            instQueue.cancelAll();
+
         ThreadID issue_tid = getIssuingThread();
         /* This will issue merrily even when interrupted in the sure and
          *  certain knowledge that the interrupt with change the stream */
@@ -1585,7 +1850,18 @@ Execute::evaluate()
             if (inst->isFault()) {
                 can_issue_next = true;
             } else if (!inst->isBubble()) {
-                next_issuable_insts.push_back(inst);
+                if (instQueue.isOffloadable(inst->staticInst)) {
+                    if (instQueue.canDispatch() &&
+                        scoreboard[tid].canInstIssue(
+                            inst, nullptr, nullptr,
+                            cpu.curCycle() + Cycles(1),
+                            cpu.getContext(tid),
+                            instQueue.isRVV(inst->staticInst))) {
+                        can_issue_next = true;
+                    }
+                } else {
+                    next_issuable_insts.push_back(inst);
+                }
             }
         }
     }
@@ -1625,7 +1901,10 @@ Execute::evaluate()
         if (!info.inFlightInsts->empty()) {
             const QueuedInst &head_inst = info.inFlightInsts->front();
 
-            if (head_inst.inst->isNoCostInst()) {
+            if (head_inst.inst->inInstQueue) {
+                head_inst_might_commit = instQueue.hasCompletion(
+                    instQueueKey(head_inst.inst));
+            } else if (head_inst.inst->isNoCostInst()) {
                 head_inst_might_commit = true;
             } else {
                 FUPipeline *fu = funcUnits[head_inst.inst->fuIndex];
@@ -1781,7 +2060,13 @@ Execute::getCommittingThread()
             can_commit_insts = can_commit_insts &&
                 (!inst->inLSQ || (lsq.findResponse(inst) != NULL));
 
-            if (!inst->inLSQ) {
+            if (inst->inInstQueue) {
+                can_commit_insts =
+                    instQueue.hasCompletion(instQueueKey(inst)) ||
+                    inst->id.streamSeqNum != ex_info.streamSeqNum ||
+                    !instQueue.hasPacket(instQueueKey(inst)) ||
+                    ex_info.drainState == DrainAllInsts;
+            } else if (!inst->inLSQ) {
                 bool can_transfer_mem_inst = false;
                 if (!ex_info.inFUMemInsts->empty() && lsq.canRequest()) {
                     const MinorDynInstPtr head_mem_ref_inst =
@@ -1896,6 +2181,12 @@ Execute::drain()
 {
     DPRINTF(Drain, "MinorExecute drain\n");
 
+    /* The host pipeline owns program-flow state.  A drain/flush therefore
+     * cancels every outstanding accelerator packet; RVV receives the cancel
+     * callback and drops queued/running lane work without inspecting a
+     * stream or branch sequence number. */
+    instQueue.cancelAll();
+
     for (ThreadID tid = 0; tid < cpu.numThreads; tid++) {
         if (executeInfo[tid].drainState == NotDraining) {
             cpu.wakeupOnEvent(Pipeline::ExecuteStageId);
@@ -1916,7 +2207,7 @@ Execute::drain()
 bool
 Execute::isDrained()
 {
-    if (!lsq.isDrained())
+    if (!lsq.isDrained() || !instQueue.empty())
         return false;
 
     for (ThreadID tid = 0; tid < cpu.numThreads; tid++) {
@@ -1965,7 +2256,17 @@ Execute::getDcachePort()
 Execute::IssueStats::IssueStats(MinorCPU *cpu)
     : statistics::Group(cpu),
       ADD_STAT(issuedInstType, statistics::units::Count::get(),
-               "Number of instructions issued per FU type, per thread")
+               "Number of instructions issued per FU type, per thread"),
+      ADD_STAT(offloadQueueFullStalls, statistics::units::Count::get(),
+               "Offload issue attempts blocked by queue capacity"),
+      ADD_STAT(offloadSourceStalls, statistics::units::Count::get(),
+               "Offload issue attempts blocked by source dependencies"),
+      ADD_STAT(offloadSerializeBeforeStalls, statistics::units::Count::get(),
+               "Offload issue attempts waiting for older retirement/memory"),
+      ADD_STAT(offloadSerializeAfterStalls, statistics::units::Count::get(),
+               "Younger issue attempts blocked by a serializing offload"),
+      ADD_STAT(offloadCompletionWaits, statistics::units::Count::get(),
+               "Commit attempts waiting for offload completion; overlaps issue stalls")
 {
     issuedInstType.init(cpu->numThreads, enums::Num_OpClass)
         .flags(statistics::total | statistics::pdf | statistics::dist);

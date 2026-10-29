@@ -297,6 +297,12 @@ MinorCPU::wakeupOnEvent(unsigned int stage_id)
     pipeline->start();
 }
 
+minor::MinorInstQueue &
+MinorCPU::getInstQueue()
+{
+    return pipeline->getInstQueue();
+}
+
 Port &
 MinorCPU::getInstPort()
 {

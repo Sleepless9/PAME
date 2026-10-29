@@ -41,6 +41,10 @@
 Import('*')
 
 if env['CONF']['BUILD_ISA']:
+    GTest('minor_inst_queue.test', 'inst_queue.test.cc', 'inst_queue.cc',
+          '../reg_class.cc', '../../sim/bufval.cc',
+          with_tag('gem5 simobject'))
+
     SimObject('BaseMinorCPU.py', sim_objects=[
         'MinorOpClass', 'MinorOpClassSet', 'MinorFUTiming', 'MinorFU',
         'MinorFUPool', 'BaseMinorCPU'],
@@ -54,6 +58,7 @@ if env['CONF']['BUILD_ISA']:
     Source('fetch1.cc')
     Source('fetch2.cc')
     Source('func_unit.cc')
+    Source('inst_queue.cc')
     Source('lsq.cc')
     Source('pipe_data.cc')
     Source('pipeline.cc')
@@ -63,13 +68,14 @@ if env['CONF']['BUILD_ISA']:
     DebugFlag('MinorCPU', 'Minor CPU-level events')
     DebugFlag('MinorExecute', 'Minor Execute stage')
     DebugFlag('MinorInterrupt', 'Minor interrupt handling')
+    DebugFlag('MinorInstQueue', 'Minor RVV/AME instruction offload queue')
     DebugFlag('MinorMem', 'Minor memory accesses')
     DebugFlag('MinorScoreboard', 'Minor Execute register scoreboard')
     DebugFlag('MinorTrace', 'MinorTrace cycle-by-cycle state trace')
     DebugFlag('MinorTiming', 'Extra timing for instructions')
 
     CompoundFlag('Minor', [
-        'MinorCPU', 'MinorExecute', 'MinorInterrupt', 'MinorMem',
+        'MinorCPU', 'MinorExecute', 'MinorInterrupt', 'MinorInstQueue', 'MinorMem',
         'MinorScoreboard'])
 
     # For backwards compatibility

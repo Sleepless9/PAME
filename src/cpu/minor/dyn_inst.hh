@@ -199,6 +199,12 @@ class MinorDynInst : public RefCounted
     /** This instruction is in the LSQ, not a functional unit */
     bool inLSQ = false;
 
+    /** This instruction is executing in an external RVV/AME component. */
+    bool inInstQueue = false;
+
+    /** An offloaded memory instruction is waiting for Minor's LSQ response. */
+    bool instQueueMemPending = false;
+
     /** Translation fault in case of a mem ref */
     Fault translationFault;
 

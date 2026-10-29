@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2013-2014, 2016-2017 ARM Limited
- * Copyright (c) 2026 BOSC & ICT, CAS
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -159,7 +158,9 @@ class Scoreboard : public Named
     bool canInstIssue(MinorDynInstPtr inst,
         const std::vector<Cycles> *src_reg_relative_latencies,
         const std::vector<bool> *cant_forward_from_fu_indices,
-        Cycles now, ThreadContext *thread_context);
+        Cycles now, ThreadContext *thread_context,
+        bool defer_vector_deps = false,
+        bool require_committed_sources = false);
 
     /** MinorTraceIF interface */
     void minorTrace() const;

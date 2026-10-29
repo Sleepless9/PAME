@@ -969,10 +969,13 @@ IEW::dispatchInsts(ThreadID tid)
             break;
         }
 
-        // Check LSQ if inst is LD/ST
-        if ((inst->isAtomic() && ldstQueue.sqFull(tid)) ||
-            (inst->isLoad() && ldstQueue.lqFull(tid)) ||
-            (inst->isStore() && ldstQueue.sqFull(tid))) {
+        const bool compute_offload = cpu->isComputeOffload(inst->staticInst);
+
+        // Accelerator memory operations use their own LSU, never the O3 LSQ.
+        if (!compute_offload &&
+            ((inst->isAtomic() && ldstQueue.sqFull(tid)) ||
+             (inst->isLoad() && ldstQueue.lqFull(tid)) ||
+             (inst->isStore() && ldstQueue.sqFull(tid)))) {
             DPRINTF(IEW, "[tid:%i] Issue: %s has become full.\n",tid,
                     inst->isLoad() ? "LQ" : "SQ");
 
@@ -1003,7 +1006,21 @@ IEW::dispatchInsts(ThreadID tid)
 
 
         // Otherwise issue the instruction just fine.
-        if (inst->isAtomic()) {
+        if (compute_offload && inst->isMemRef()) {
+            add_to_iq = true;
+            // Rename reserved provisional LSQ credits before the external LSU
+            // ownership was known; return them without allocating LSQ entries.
+            if (inst->isLoad()) {
+                ++toRename->iewInfo[tid].dispatchedToLQ;
+                ++iewStats.dispLoadInsts;
+            }
+            if (inst->isStore() || inst->isAtomic()) {
+                ++toRename->iewInfo[tid].dispatchedToSQ;
+                ++iewStats.dispStoreInsts;
+            }
+        } else if (compute_offload) {
+            add_to_iq = true;
+        } else if (inst->isAtomic()) {
             DPRINTF(IEW, "[tid:%i] Issue: Memory instruction "
                     "encountered, adding to LSQ.\n", tid);
 
@@ -1155,6 +1172,9 @@ IEW::executeInsts()
     wbNumInst = 0;
     wbCycle = 0;
 
+    // Accelerator completions share the normal O3 writeback bandwidth.
+    cpu->completeComputeOffloads();
+
     for (ThreadID tid : *activeThreads) {
         fetchRedirect[tid] = false;
     }
@@ -1204,7 +1224,12 @@ IEW::executeInsts()
         // Execute instruction.
         // Note that if the instruction faults, it will be handled
         // at the commit stage.
-        if (inst->isMemRef()) {
+        if (cpu->isComputeOffload(inst->staticInst)) {
+            panic_if(!cpu->dispatchComputeOffload(inst),
+                     "O3 compute command queue exhausted; increase "
+                     "computeInstQueueSize");
+            continue;
+        } else if (inst->isMemRef()) {
             DPRINTF(IEW, "Execute: Calculating address for memory "
                     "reference.\n");
 

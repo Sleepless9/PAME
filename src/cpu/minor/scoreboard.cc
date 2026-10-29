@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2013-2014, 2016-2017 ARM Limited
- * Copyright (c) 2026 BOSC & ICT, CAS
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -209,7 +208,8 @@ bool
 Scoreboard::canInstIssue(MinorDynInstPtr inst,
     const std::vector<Cycles> *src_reg_relative_latencies,
     const std::vector<bool> *cant_forward_from_fu_indices,
-    Cycles now, ThreadContext *thread_context)
+    Cycles now, ThreadContext *thread_context, bool defer_vector_deps,
+    bool require_committed_sources)
 {
     /* Always allow fault to be issued */
     if (inst->isFault())
@@ -245,7 +245,9 @@ Scoreboard::canInstIssue(MinorDynInstPtr inst,
         RegId reg = staticInst->srcRegIdx(src_index).flatten(*isa);
         unsigned short int index;
 
-        if (findIndex(reg, index)) {
+        const bool vector_dep = reg.is(VecRegClass) ||
+            reg.is(VecElemClass) || reg.is(VecPredRegClass);
+        if (!(defer_vector_deps && vector_dep) && findIndex(reg, index)) {
             int src_reg_fu = fuIndices[index];
             bool cant_forward = src_reg_fu != invalidFUIndex &&
                 cant_forward_from_fu_indices &&
@@ -257,7 +259,11 @@ Scoreboard::canInstIssue(MinorDynInstPtr inst,
                     default_relative_latency :
                     (*src_reg_relative_latencies)[src_index]));
 
-            if (returnCycle[index] > (now + relative_latency) ||
+            // Offload packets snapshot architectural operands at issue.
+            // An estimated FU return cycle does not imply that the producer
+            // has committed its value to ThreadContext yet.
+            if ((require_committed_sources && numResults[index] != 0) ||
+                returnCycle[index] > (now + relative_latency) ||
                 numUnpredictableResults[index] != 0)
             {
                 ret = false;

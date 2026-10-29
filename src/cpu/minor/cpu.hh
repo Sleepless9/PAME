@@ -47,6 +47,7 @@
 #include "base/compiler.hh"
 #include "base/random.hh"
 #include "cpu/base.hh"
+#include "cpu/compute_offload.hh"
 #include "cpu/minor/activity.hh"
 #include "cpu/minor/stats.hh"
 #include "cpu/simple_thread.hh"
@@ -62,6 +63,7 @@ namespace minor
 /** Forward declared to break the cyclic inclusion dependencies between
  *  pipeline and cpu */
 class Pipeline;
+class MinorInstQueue;
 
 /** Minor will use the SimpleThread state for now */
 typedef SimpleThread MinorThread;
@@ -81,7 +83,7 @@ typedef SimpleThread MinorThread;
  *      minor::ExecContext objects
  *  created by minor::Execute.
  */
-class MinorCPU : public BaseCPU
+class MinorCPU : public BaseCPU, public ComputeOffloadCPU
 {
   protected:
     /** pipeline is a container for the clockable pipeline stage objects.
@@ -204,6 +206,9 @@ class MinorCPU : public BaseCPU
      *  already been idled.  The stage argument should be from the
      *  enumeration Pipeline::StageId */
     void wakeupOnEvent(unsigned int stage_id);
+
+    /** Queue used by an external RVV/AME component to consume/complete ops. */
+    minor::MinorInstQueue &getInstQueue() override;
     EventFunctionWrapper *fetchEventWrapper;
 };
 
