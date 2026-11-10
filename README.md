@@ -1,80 +1,28 @@
-# AME_gem5: AME Instruction Set Extension for gem5
+# PAME
 
-AME_gem5 is an open-source simulation and validation environment built upon the gem5 system-level simulator, specifically designed to provide comprehensive support for the Attached Matrix Extension (AME) instruction set. It is our expectation that this gem5 simulator will provide support for AME functional verification, performance modeling, and analysis. We actively encourage contributions from the broader community to collaboratively develop and refine this simulator, and thereby advance the optimization and architectural design of the AME extension.
+**Performance Analysis and Bottleneck Localization for RISC-V Matrix Extensions**
 
-![AME_gem5 system overview](docs/ztt-v0.6_system_overview.png)
+PAME is a research project built upon [AME_gem5](https://github.com/OpenXiangShan/AME_gem5), aiming to develop a performance analysis and bottleneck localization framework for RISC-V Attached Matrix Extension (AME).
 
-## Key Features
+## Overview
 
-- **AME Ztt v0.6 Instruction type supported**
-  - Resource Management
-  - Datatype Management
-  - Elementwise Arithmetic
-  - Bitwise
-  - Compare and Predication
-  - Permutation
-  - Register move / data conversion
-  - Elementwise Math Functions
-  - Memory
-  - State Management
-  - Matrix Multiply
-  - Reduction
+PAME extends AME_gem5 with support for out-of-order (O3) CPU execution and microarchitectural modeling of matrix execution units.
 
-- **Large Language Model (LLM) Inference Operators**
-  - Matrix multiplication: FP32 GEMM, INT8 GEMM, mixed-precision GEMM
-  - Normalization and activation: RMSNorm, GELU, Softmax
-  - Transformer components: RoPE, MHA, FFN
+The project focuses on understanding the performance behavior of matrix workloads, particularly the interactions among CPU execution, matrix computation, and memory access.
 
-See the community release of spec Ztt v0.6 for details.
+## Research Objectives
 
-## Quick Start
+- **Performance Modeling:** Develop configurable microarchitectural models for matrix execution.
+- **Performance Analysis:** Explore Roofline and hierarchical Top-down analysis methods for RISC-V AME.
+- **Bottleneck Localization:** Identify performance bottlenecks across CPU, matrix execution units, and memory systems.
+- **Software Optimization:** Provide performance insights to guide matrix workload optimization.
 
-### Prerequisites
+## Project Status
 
-- A C++ compiler, Python 3, SCons, and the other gem5 dependencies. See the [gem5 build documentation](https://www.gem5.org/documentation/general_docs/building/).
-- A RISC-V GNU toolchain with binutils and libgcc.a.
-- An LLVM-based RISC-V toolchain with AME Ztt v0.6 support.
+PAME is currently under active development.
 
-### Build gem5
+The research builds upon O3 CPU integration and matrix microarchitecture modeling, with ongoing work toward performance profiling and bottleneck analysis.
 
-In the AME_gem5 root directory:
+## Acknowledgments
 
-```sh
-scons build/RISCV/gem5.opt -j$(nproc)
-```
-
-Then, install the toolchain:
-
-```sh
-./scripts/build_toolchain.sh
-```
-
-Or, to build the AME LLVM toolchain from source, use:
-
-```sh
-./scripts/build_toolchain.sh --src
-```
-
-### Run examples and tests
-
-Build and test an operator example:
-
-```sh
-make -C example gemm_fp32
-```
-
-Build and test all operators:
-
-```sh
-make -C example test
-```
-
-On Ubuntu 24.04.3 LTS, instruction, operator, and function-level tests pass.
-
-## License
-
-New AME_gem5 code is distributed under the BSD three-clause license in
-[LICENSE](LICENSE). The original gem5 code and its existing per-file
-copyrights remain covered by [COPYING](COPYING) and the notices in each file.
-Third-party components retain their own `LICENSE`, `COPYING`, or `NOTICE`
-terms.
+This project is based on [OpenXiangShan/AME_gem5](https://github.com/OpenXiangShan/AME_gem5) and the [gem5 simulator](https://www.gem5.org/).
